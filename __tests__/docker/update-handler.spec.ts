@@ -23,6 +23,23 @@ jest.mock('../../src/logger', () => ({
   },
 }))
 
+// The no-follow read is tested against the real filesystem in
+// update-handler-nofollow.spec.ts; here it forwards to the mocked fs.
+jest.mock('../../src/utils/marker-file', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fsMock = require('fs') as typeof import('fs')
+  return {
+    readMarkerFile: jest.fn((p: string) => {
+      try {
+        return String(fsMock.readFileSync(p, 'utf-8')).trim()
+      } catch {
+        return undefined
+      }
+    }),
+    pathExistsNoFollow: jest.fn(() => false),
+  }
+})
+
 jest.mock('../../src/utils/version', () => ({
   isValidVersion: jest.fn(),
 }))

@@ -21,6 +21,11 @@
  *     receive later bundle updates on their next sync, or the fix in that
  *     later bundle version never reaches them no matter how many times they
  *     upgrade the CLI (see the REGRESSION test in dockerfile-sync.spec.ts).
+ *
+ * Every read and write of a config-dir copy goes through utils/marker-file:
+ * a symlink there is never followed (design §7.7). Reading one throws, which
+ * the callers below turn into a warning and a skipped sync; writing replaces
+ * the symlink itself instead of writing through it.
  */
 
 import * as crypto from 'crypto'
@@ -31,7 +36,17 @@ import { getConfigDir } from '../config-manager'
 import { getDockerfilePath, getDockerContextDir } from './dockerfile-path'
 import { t } from '../i18n'
 import { logger } from '../logger'
-import { atomicWriteFile, getErrorMessage } from '../utils'
+import { getErrorMessage } from '../utils'
+import {
+  DOCKER_ASSET_MAX_BYTES,
+  MARKER_FILE_MAX_BYTES,
+  copyBundledFileNoFollow,
+  ensureRealDirectoryChain,
+  isRegularFileNoFollow,
+  pathExistsNoFollow,
+  readRegularFileNoFollow,
+  writeFileNoFollow,
+} from '../utils/marker-file'
 
 /** A bundled source file and its destination in the config directory. */
 interface SyncPair {
@@ -85,11 +100,27 @@ export const OPTIONAL_DOCKER_ASSETS = [
  */
 const NEW_OPTIONAL_ASSETS = OPTIONAL_DOCKER_ASSETS.filter((p) => p !== LEGACY_OPTIONAL_ASSET)
 
+/** Read a config-dir build asset without following a symlink; missing is an error. */
+function readConfigAsset(filePath: string): Buffer {
+  const content = readRegularFileNoFollow(filePath, DOCKER_ASSET_MAX_BYTES)
+  if (content === undefined) throw new Error(`File not found: ${filePath}`)
+  return content
+}
+
+/**
+ * Read a bundled build asset (inside the installed npm package). No container
+ * can write there, so it is read normally: package layouts that symlink
+ * individual files (Nix, Bazel rules_js, ...) keep working.
+ */
+function readBundledAsset(filePath: string): Buffer {
+  return fs.readFileSync(filePath)
+}
+
 /** Combined SHA-256 over the given files, hashed in order. */
-function combinedSha256(filePaths: string[]): string {
+function combinedSha256(filePaths: string[], read: (filePath: string) => Buffer): string {
   const hash = crypto.createHash('sha256')
   for (const filePath of filePaths) {
-    const content = fs.readFileSync(filePath)
+    const content = read(filePath)
     // Length prefix keeps file boundaries distinct so different splits of the
     // same concatenated bytes cannot collide
     hash.update(`${content.length}\n`)
@@ -102,8 +133,32 @@ function combinedSha256(filePaths: string[]): string {
 function copyPairs(configDir: string, pairs: SyncPair[]): void {
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 })
   for (const pair of pairs) {
-    fs.mkdirSync(path.dirname(pair.dest), { recursive: true })
-    fs.copyFileSync(pair.src, pair.dest)
+    // The no-follow write covers the file name only; refuse a symlinked
+    // directory below the config dir too (e.g. configDir/docker pointing
+    // somewhere else). The config dir itself is the host user's choice.
+    // Created one level at a time, each checked before anything is created
+    // inside it: a recursive mkdir would follow a symlinked parent.
+    const destDir = path.dirname(pair.dest)
+    if (destDir !== configDir) ensureRealDirectoryChain(configDir, destDir)
+    // The bundled source is read normally; only the config-dir destination
+    // is written without following a symlink.
+    copyBundledFileNoFollow(pair.src, pair.dest)
+  }
+}
+
+/**
+ * True when nothing is at `dest`, or only a dangling symlink. `stat` follows a
+ * symlink only to see whether its target exists; the target is never read.
+ */
+function destIsMissing(dest: string): boolean {
+  if (!pathExistsNoFollow(dest)) return true
+  if (isRegularFileNoFollow(dest)) return false
+  try {
+    fs.statSync(dest)
+    return false
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return true
+    throw error
   }
 }
 
@@ -114,8 +169,13 @@ function copyPairs(configDir: string, pairs: SyncPair[]): void {
  * older CLI version must still be treated as needing a re-copy.
  */
 function isOutOfDate(pair: SyncPair): boolean {
-  if (!fs.existsSync(pair.dest)) return true
-  return !fs.readFileSync(pair.src).equals(fs.readFileSync(pair.dest))
+  // Missing (a dangling symlink included): replaced by a regular copy (the
+  // write replaces the link itself). Any other non-regular file, such as a
+  // live symlink the user placed, is refused by the read below and left as is.
+  if (destIsMissing(pair.dest)) return true
+  const dest = readRegularFileNoFollow(pair.dest, DOCKER_ASSET_MAX_BYTES)
+  if (dest === undefined) return true // vanished since the check above
+  return !readBundledAsset(pair.src).equals(dest)
 }
 
 /**
@@ -171,23 +231,29 @@ export function syncDockerfileToConfigDir(): void {
       }
     }
 
-    const legacyDestMissing = legacyPairs.some((pair) => !fs.existsSync(pair.dest))
+    // A dangling symlink counts as missing (self-heal: the copy replaces the
+    // link). A live symlink is present, and is refused when it is read (never
+    // followed) rather than silently replaced.
+    const legacyDestMissing = legacyPairs.some((pair) => destIsMissing(pair.dest))
+    // undefined when there is no hash file (also when it vanished between
+    // checks); a symlink or other non-regular file there throws (refused).
+    const savedHashContent = readRegularFileNoFollow(hashFile, MARKER_FILE_MAX_BYTES)
 
-    if (!fs.existsSync(hashFile) || legacyDestMissing) {
+    if (savedHashContent === undefined || legacyDestMissing) {
       // First run, existing user without hash file, or part of the legacy
       // pair was deleted — overwrite the pair unconditionally.
       // Remove the hash file before copying: if any copy fails midway, the
       // next run sees no hash file and retries this branch (self-heal)
       fs.rmSync(hashFile, { force: true })
       copyPairs(configDir, legacyPairs)
-      atomicWriteFile(hashFile, combinedSha256(legacyPairs.map((pair) => pair.src)))
+      writeFileNoFollow(hashFile, combinedSha256(legacyPairs.map((pair) => pair.src), readBundledAsset))
       logger.info(t('docker.dockerfileSynced', { path: destDockerfile }))
       return
     }
 
     // trim() guards against a stray trailing newline in the hash file
-    const savedHash = fs.readFileSync(hashFile, 'utf-8').trim()
-    const currentConfigHash = combinedSha256(legacyPairs.map((pair) => pair.dest))
+    const savedHash = savedHashContent.toString('utf-8').trim()
+    const currentConfigHash = combinedSha256(legacyPairs.map((pair) => pair.dest), readConfigAsset)
 
     if (savedHash !== currentConfigHash) {
       // User has customised the Dockerfile or entrypoint.sh — warn and skip.
@@ -198,7 +264,7 @@ export function syncDockerfileToConfigDir(): void {
     }
 
     // Not customised
-    const bundledHash = combinedSha256(legacyPairs.map((pair) => pair.src))
+    const bundledHash = combinedSha256(legacyPairs.map((pair) => pair.src), readBundledAsset)
     if (bundledHash === currentConfigHash) {
       // Legacy pair already up to date — no-op (new assets, if any, were
       // still copied above)
@@ -208,7 +274,7 @@ export function syncDockerfileToConfigDir(): void {
     // partial copy is retried (not misjudged as customised) on the next run
     fs.rmSync(hashFile, { force: true })
     copyPairs(configDir, legacyPairs)
-    atomicWriteFile(hashFile, bundledHash)
+    writeFileNoFollow(hashFile, bundledHash)
     logger.info(t('docker.dockerfileUpdated', { path: destDockerfile }))
   } catch (err: unknown) {
     logger.warn(t('docker.dockerfileSyncFailed', { message: getErrorMessage(err) }))
@@ -231,8 +297,8 @@ export function hasUnmanagedConfigDockerfile(): boolean {
   const configDir = getConfigDir()
   try {
     return (
-      fs.existsSync(path.join(configDir, 'Dockerfile')) &&
-      !fs.existsSync(path.join(configDir, '.dockerfile-sync-hash'))
+      pathExistsNoFollow(path.join(configDir, 'Dockerfile')) &&
+      !pathExistsNoFollow(path.join(configDir, '.dockerfile-sync-hash'))
     )
   } catch {
     // Unreadable config dir — assume unmanaged so nothing gets overwritten.
@@ -281,9 +347,12 @@ export function isDockerfileCustomized(): boolean {
 
     // An absent config-dir copy carries no user content (see doc comment).
     return [dockerfilePair, ...assetPairs].some(
-      (pair) => fs.existsSync(pair.dest) && isOutOfDate(pair),
+      (pair) => pathExistsNoFollow(pair.dest) && isOutOfDate(pair),
     )
-  } catch {
+  } catch (error) {
+    // Counted as customised (a local build is the safe side), but say why:
+    // a refused symlink or an I/O error must not look like a user edit.
+    logger.warn(`[docker] Could not compare the config-dir Docker files with the bundle: ${getErrorMessage(error)}`)
     return true
   }
 }

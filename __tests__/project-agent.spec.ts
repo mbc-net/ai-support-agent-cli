@@ -3359,15 +3359,17 @@ describe('ProjectAgent', () => {
   })
 
   describe('docker-built-hash initialization', () => {
+    // The marker is read through readMarkerFile (no-follow, size-limited;
+    // tested against the real filesystem in __tests__/utils/marker-file.spec.ts).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const markerFile = require('../src/utils/marker-file') as typeof import('../src/utils/marker-file')
+
     it('should initialize dockerCustomizationHash from docker-built-hash file when in Docker', () => {
       const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
       process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
 
-      const mockFs = require('fs')
-      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((...args: unknown[]) => {
-        if (String(args[0]).endsWith('docker-built-hash')) return 'abc123hash'
-        throw new Error('ENOENT')
-      })
+      const mockReadFileSync = jest.spyOn(markerFile, 'readMarkerFile').mockImplementation((p: string) =>
+        p.endsWith('docker-built-hash') ? 'abc123hash' : undefined)
 
       try {
         const agent = new ProjectAgent(project, 'agent-1', options)
@@ -3385,10 +3387,7 @@ describe('ProjectAgent', () => {
       const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
       process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
 
-      const mockFs = require('fs')
-      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((..._args: unknown[]) => {
-        throw new Error('ENOENT')
-      })
+      const mockReadFileSync = jest.spyOn(markerFile, 'readMarkerFile').mockReturnValue(undefined)
 
       try {
         const agent = new ProjectAgent(project, 'agent-1', options)
@@ -3405,14 +3404,13 @@ describe('ProjectAgent', () => {
       const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
       delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
 
-      const mockFs = require('fs')
-      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync')
+      const mockReadFileSync = jest.spyOn(markerFile, 'readMarkerFile')
 
       try {
         const agent = new ProjectAgent(project, 'agent-1', options)
         const state = (agent as unknown as { configSyncState: { dockerCustomizationHash: string | undefined } }).configSyncState
         expect(state.dockerCustomizationHash).toBeUndefined()
-        expect(mockReadFileSync).not.toHaveBeenCalledWith(expect.stringContaining('docker-built-hash'), expect.anything())
+        expect(mockReadFileSync).not.toHaveBeenCalledWith(expect.stringContaining('docker-built-hash'))
       } finally {
         mockReadFileSync.mockRestore()
         if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER
@@ -3424,19 +3422,13 @@ describe('ProjectAgent', () => {
       const originalDockerEnv = process.env.AI_SUPPORT_AGENT_IN_DOCKER
       process.env.AI_SUPPORT_AGENT_IN_DOCKER = '1'
 
-      const mockFs = require('fs')
-      const mockReadFileSync = jest.spyOn(mockFs, 'readFileSync').mockImplementation((..._args: unknown[]) => {
-        throw new Error('ENOENT')
-      })
+      const mockReadFileSync = jest.spyOn(markerFile, 'readMarkerFile').mockReturnValue(undefined)
 
       try {
         const agent = new ProjectAgent(project, 'agent-1', options)
         expect(agent).toBeDefined()
         // Should have tried to read from configDir root (not a sub-path with tenantCode)
-        expect(mockReadFileSync).toHaveBeenCalledWith(
-          expect.stringContaining('docker-built-hash'),
-          'utf-8',
-        )
+        expect(mockReadFileSync).toHaveBeenCalledWith(expect.stringContaining('docker-built-hash'))
       } finally {
         mockReadFileSync.mockRestore()
         if (originalDockerEnv === undefined) delete process.env.AI_SUPPORT_AGENT_IN_DOCKER

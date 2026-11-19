@@ -219,6 +219,8 @@
   "docker.dockerAssetSyncFailed": "バンドル版の設定ファイル同期に失敗しました {{path}}: {{message}}",
   "docker.diffNoTarget": "比較対象のDockerfileがありません。パスを指定するか設定にdockerfilePathを設定してください。",
   "docker.diffTargetNotFound": "Dockerfileが見つかりません: {{path}}",
+  "docker.configDockerfileRefused": "{{path}} からのビルドを中止しました: {{reason}}",
+  "docker.diffTargetUnreadable": "{{path}} を読み込めません: {{message}}",
   "docker.diffIdentical": "DockerfileはバンドルデフォルトのDockerfileと同一です。",
   "docker.diffDone": "差分表示が完了しました。",
   "docker.diffDefaultError": "バンドルDockerfileの読み込みに失敗しました: {{message}}",
