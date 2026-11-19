@@ -18,6 +18,7 @@
  */
 
 import { EventEmitter } from 'events'
+import { createHash } from 'crypto'
 
 class FakeSshClient extends EventEmitter {
   connect = jest.fn()
@@ -82,6 +83,7 @@ function sshCredential(overrides: Partial<SshCredentials> = {}): SshCredentials 
     username: 'ubuntu',
     authType: 'privateKey',
     privateKey: PRIVATE_KEY,
+    hostKeyFingerprint: `SHA256:${createHash('sha256').update('trusted-key').digest('base64').replace(/=+$/, '')}`,
     ...overrides,
   }
 }
@@ -108,9 +110,17 @@ async function openReady(ssh: SshCredentials = sshCredential()) {
 }
 
 describe('openSshTunnel', () => {
+  it('rejects missing pins before SSH client creation', async () => {
+    await expect(openSshTunnel(sshCredential({ hostKeyFingerprint: undefined }), TARGET)).rejects.toThrow('hostKeyFingerprint')
+    expect(mockClientCtor).not.toHaveBeenCalled()
+  })
+
   it('connects the SSH client with hostname/port and privateKey auth', async () => {
     await openReady()
     const connectConfig = lastClient!.connect.mock.calls[0][0]
+    expect(connectConfig.hostVerifier).toEqual(expect.any(Function))
+    expect(connectConfig.hostVerifier(Buffer.from('trusted-key'))).toBe(true)
+    expect(connectConfig.hostVerifier(Buffer.from('attacker-key'))).toBe(false)
     expect(connectConfig.host).toBe('203.0.113.10')
     expect(connectConfig.port).toBe(22)
     expect(connectConfig.username).toBe('ubuntu')

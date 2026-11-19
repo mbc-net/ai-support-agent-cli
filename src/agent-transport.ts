@@ -582,6 +582,7 @@ async function processCommand(
       tenantCode: deps.tenantCode,
       projectCode: deps.projectCode,
       browserLocalPort: ctx.transportState.vsCodeWs?.getBrowserLocalPort(),
+      browserLocalToken: ctx.transportState.vsCodeWs?.getBrowserLocalToken(),
       onSetup: ctx.onSetup,
       onConfigSync: ctx.onConfigSync,
       onReboot: ctx.onReboot,

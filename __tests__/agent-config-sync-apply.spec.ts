@@ -281,6 +281,7 @@ describe('applyProjectConfig - error handling branches', () => {
       ],
       undefined,
       deps.browserLocalPort,
+      deps.browserLocalToken,
     )
   })
 

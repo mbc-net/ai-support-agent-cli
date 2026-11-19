@@ -28,6 +28,7 @@ describe('forwardAgentExecutionContext', () => {
     tenantCode: 'mbc',
     projectCode: 'OWN_PROJECT',
     browserLocalPort: 19222,
+    browserLocalToken: 'fixture-token',
   } as unknown as Required<AgentExecutionContext>
 
   const CONTEXT_KEYS = Object.keys(FULL_CONTEXT) as (keyof AgentExecutionContext)[]

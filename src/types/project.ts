@@ -169,6 +169,8 @@ export interface RepoCredentials {
 
 /** Fields common to every SSH credential the agent resolves, regardless of transport. */
 interface SshCredentialCommon {
+  /** Trusted OpenSSH SHA256 host-key pin. Missing pins fail closed at connection time. */
+  hostKeyFingerprint?: string
   hostId: string
 }
 

@@ -309,6 +309,10 @@ export class VsCodeTunnelWebSocket extends BaseWebSocketConnection<VsCodeServerM
   /**
    * Get the port of the browser local HTTP server (0 if not started).
    */
+  getBrowserLocalToken(): string | undefined {
+    return this.browserLocalServer?.getAuthToken()
+  }
+
   getBrowserLocalPort(): number {
     return this.browserLocalPort
   }

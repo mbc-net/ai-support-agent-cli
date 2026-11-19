@@ -223,6 +223,7 @@ function httpRequest(baseUrl: string, method: string, path: string, body?: strin
       method,
       headers: {
         'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.AI_SUPPORT_BROWSER_LOCAL_TOKEN ?? ''}`,
       },
     }
 

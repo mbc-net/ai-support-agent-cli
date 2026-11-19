@@ -128,7 +128,12 @@ async function resolveFirstSessionId(localPort: string): Promise<string | null> 
  */
 function httpGet(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    http.get(url, { timeout: BROWSER_TIMEOUT_REQUEST_MS }, (res) => {
+    http.get(url, { timeout: BROWSER_TIMEOUT_REQUEST_MS, headers: { Authorization: `Bearer ${process.env.AI_SUPPORT_BROWSER_LOCAL_TOKEN ?? ''}` } }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume()
+        reject(new Error(`Browser local server returned ${res.statusCode}`))
+        return
+      }
       streamToBuffer(res).then((buf) => resolve(buf.toString()), reject)
     }).on('error', reject)
   })
