@@ -41,7 +41,8 @@
     "scripts/install-zabbix-controller.sh",
     "LICENSE",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "!ansible/ssh-policy/tests/**"
   ],
   "scripts": {
     "dev": "node --env-file-if-exists=.env --require ts-node/register src/index.ts",
@@ -56,7 +57,8 @@
     "ansible:lint": "yamllint -c ansible/.yamllint ansible/roles ansible/molecule && ansible-lint --offline -c ansible/.ansible-lint ansible/roles",
     "ansible:syntax": "ANSIBLE_ROLES_PATH=ansible/roles ansible-playbook --syntax-check -i localhost, ansible/molecule/default/converge.yml",
     "ansible:molecule": "cd ansible && for d in molecule/*/; do s=$(basename \"$d\"); [ -f \"$d/molecule.yml\" ] || continue; echo \"--- molecule test -s $s\" && molecule test -s \"$s\" || exit 1; done",
-    "ansible:molecule:os_init": "cd ansible && molecule test -s os_init"
+    "ansible:molecule:os_init": "cd ansible && molecule test -s os_init",
+    "test:ssh-policy": "python3 -m unittest discover -s ansible/ssh-policy/tests -p test_policy.py -v"
   },
   "dependencies": {
     "@aws-crypto/sha256-js": "^5.2.0",
