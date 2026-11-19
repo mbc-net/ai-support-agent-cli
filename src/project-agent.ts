@@ -1078,6 +1078,7 @@ export class ProjectAgent {
         // recipe to any agent that does not advertise this capability.
         SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
         SENTRY_CAPABILITY,
+        'ssh_source_ip_sync_v1',
         // Can run server-setup recipes against Windows hosts over OpenSSH; the
         // api requires this before dispatching a Windows run.
         SERVER_SETUP_WINDOWS_OPENSSH_CAPABILITY,

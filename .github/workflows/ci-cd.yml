@@ -134,6 +134,9 @@ jobs:
       - name: Run json callback no_log censorship tests
         run: python3 ansible/callback_plugins/tests/test_json_callback.py -v
 
+      - name: Run transactional SSH policy tests
+        run: python3 -m unittest discover -s ansible/ssh-policy/tests -p "test_*.py" -v
+
   # ---------------------------------------------------------------------------
   # Channel locks (release channels: latest / beta / alpha)
   #
