@@ -1,3 +1,4 @@
+import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
@@ -8,6 +9,7 @@ jest.mock('../../src/config-manager', () => ({
 import { getConfigDir } from '../../src/config-manager'
 import {
   getAgentErrLog,
+  getBuildSnapshotsDir,
   getAgentOutLog,
   getDarwinLaunchAgentsDir,
   getDarwinLogDir,
@@ -24,6 +26,7 @@ import {
   getWrapperErrLog,
   getWrapperOutLog,
   getWrapperScriptPath,
+  prepareSnapshotsDir,
 } from '../../src/utils/path-utils'
 
 const mockedGetConfigDir = jest.mocked(getConfigDir)
@@ -229,3 +232,73 @@ describe('getWin32LogDir', () => {
     )
   })
 })
+
+describe('prepareSnapshotsDir (design §7.7)', () => {
+  let configDir: string
+  const DAY = 24 * 60 * 60 * 1000
+
+  beforeEach(() => {
+    configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'path-utils-snapshots-'))
+    mockedGetConfigDir.mockReturnValue(configDir)
+  })
+
+  afterEach(() => {
+    fs.rmSync(configDir, { recursive: true, force: true })
+  })
+
+  it('creates <configDir>/.build-snapshots as a 0700 real directory', () => {
+    prepareSnapshotsDir()
+    const dir = getBuildSnapshotsDir()
+    expect(dir).toBe(path.join(configDir, '.build-snapshots'))
+    expect(fs.lstatSync(dir).isDirectory()).toBe(true)
+    if (process.platform !== 'win32') expect(fs.statSync(dir).mode & 0o777).toBe(0o700)
+  })
+
+  it('removes snapshot directories older than a day, and keeps recent ones and anything else', () => {
+    const dir = path.join(configDir, '.build-snapshots')
+    fs.mkdirSync(dir)
+    for (const name of ['snapshot-old', 'snapshot-new', 'other-old']) {
+      fs.mkdirSync(path.join(dir, name))
+      fs.writeFileSync(path.join(dir, name, 'Dockerfile'), 'FROM scratch\n')
+    }
+    fs.writeFileSync(path.join(dir, 'snapshot-file'), '')
+    const now = Date.now()
+    const old = new Date(now - 2 * DAY)
+    fs.utimesSync(path.join(dir, 'snapshot-old'), old, old)
+    fs.utimesSync(path.join(dir, 'other-old'), old, old)
+    fs.utimesSync(path.join(dir, 'snapshot-file'), old, old)
+
+    prepareSnapshotsDir(now)
+
+    expect(fs.readdirSync(dir).sort()).toEqual(['other-old', 'snapshot-file', 'snapshot-new'])
+  })
+
+  it('refuses a snapshots directory that is a symlink, and touches nothing behind it', () => {
+    const elsewhere = path.join(configDir, 'elsewhere')
+    fs.mkdirSync(elsewhere)
+    fs.mkdirSync(path.join(elsewhere, 'snapshot-x'))
+    fs.symlinkSync(elsewhere, path.join(configDir, '.build-snapshots'))
+
+    expect(() => prepareSnapshotsDir(Date.now() + 10 * DAY)).toThrow(/Not a real directory/)
+    expect(fs.readdirSync(elsewhere)).toEqual(['snapshot-x'])
+  })
+
+  it('ignores an entry that vanishes while it is being checked', () => {
+    const dir = path.join(configDir, '.build-snapshots')
+    fs.mkdirSync(path.join(dir, 'snapshot-gone'), { recursive: true })
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const realFs = require('fs') as typeof import('fs')
+    const original = realFs.lstatSync.bind(realFs)
+    const lstat = jest.spyOn(realFs, 'lstatSync')
+    lstat.mockImplementation(((p: fs.PathLike) => {
+      if (String(p).endsWith('snapshot-gone')) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      return original(p)
+    }) as typeof fs.lstatSync)
+    try {
+      expect(() => prepareSnapshotsDir()).not.toThrow()
+    } finally {
+      lstat.mockRestore()
+    }
+  })
+})
+

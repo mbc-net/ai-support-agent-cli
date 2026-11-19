@@ -111,6 +111,45 @@ jest.mock('../../src/pid-manager', () => ({
   readPidFile: jest.fn().mockReturnValue(null),
 }))
 
+// The no-follow file helpers are tested against the real filesystem in
+// __tests__/utils/marker-file.spec.ts; here they forward to the mocked fs.
+// The snapshot directory itself is tested in __tests__/utils/path-utils.spec.ts.
+jest.mock('../../src/utils/path-utils', () => ({
+  ...jest.requireActual('../../src/utils/path-utils'),
+  prepareSnapshotsDir: jest.fn(),
+}))
+
+jest.mock('../../src/utils/marker-file', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fsMock = require('fs') as typeof import('fs')
+  return {
+    MARKER_FILE_MAX_BYTES: 64 * 1024,
+    DOCKER_ASSET_MAX_BYTES: 1024 * 1024,
+    UnsafeFileError: class UnsafeFileError extends Error {},
+    assertRealDirectory: jest.fn(),
+    ensureRealDirectoryChain: jest.fn(),
+    snapshotDockerfile: jest.fn((p: string) => (fsMock.existsSync(p) ? { path: p, cleanup: jest.fn() } : undefined)),
+    pathExistsNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    isRegularFileNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    readMarkerFile: jest.fn((p: string) => {
+      try {
+        return String(fsMock.readFileSync(p, 'utf-8')).trim()
+      } catch {
+        return undefined
+      }
+    }),
+    readRegularFileNoFollow: jest.fn((p: string) => (fsMock.existsSync(p) ? fsMock.readFileSync(p) : undefined)),
+    writeFileNoFollow: jest.fn((p: string, content: string | Buffer) => fsMock.writeFileSync(p, content, 'utf-8')),
+    copyBundledFileNoFollow: jest.fn((src: string, dst: string) => fsMock.copyFileSync(src, dst)),
+    copyRegularFileNoFollow: jest.fn((src: string, dst: string) => {
+      fsMock.copyFileSync(src, dst)
+      return true
+    }),
+    snapshotRegularFile: jest.fn((p: string) =>
+      fsMock.existsSync(p) ? { path: p, cleanup: jest.fn() } : undefined),
+  }
+})
+
 import { execFileSync, spawn } from 'child_process'
 import * as crypto from 'crypto'
 import * as os from 'os'
@@ -2449,10 +2488,8 @@ describe('docker-runner', () => {
       await Promise.resolve()
       // buildProjectImage is now async (spawn-based), emit close to resolve the build
       fakeBuildChild.emit('close', 0)
-      await Promise.resolve()
-      await Promise.resolve()
-      await Promise.resolve()
-      await Promise.resolve()
+      // Drain the rebuild → restart chain (its number of awaits is an implementation detail).
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
 
       // unlinkSync should have been called for the marker
       expect(unlinkSync).toHaveBeenCalled()
@@ -2555,10 +2592,8 @@ describe('docker-runner', () => {
       await Promise.resolve()
       // buildProjectImage spawn emits non-zero exit code to simulate build failure
       fakeBuildChild.emit('close', 1)
-      await Promise.resolve()
-      await Promise.resolve()
-      await Promise.resolve()
-      await Promise.resolve()
+      // Drain the rebuild → restart chain (its number of awaits is an implementation detail).
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
 
       // Container should have been restarted with previous image (3 total: container1 + build + container2)
       expect(mockSpawn).toHaveBeenCalledTimes(3)
@@ -2599,10 +2634,8 @@ describe('docker-runner', () => {
       fakeChild1.emit('close', 43)
       await Promise.resolve()
       fakeBuildChild.emit('close', 1)
-      await Promise.resolve()
-      await Promise.resolve()
-      await Promise.resolve()
-      await Promise.resolve()
+      // Drain the rebuild → restart chain (its number of awaits is an implementation detail).
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
 
       // Spawn called 4 times: PROJ_A initial + PROJ_B initial + build + PROJ_A restart with previous image
       expect(mockSpawn).toHaveBeenCalledTimes(4)
@@ -2739,10 +2772,11 @@ describe('docker-runner', () => {
           { tenantCode: 'mbc', projectCode: 'PROJ_A', token: 'token-a', apiUrl: 'http://api-a' },
         ],
       })
-      // Both hash files exist but with different hashes
+      // Both hash files exist but with different hashes, and there is a
+      // project Dockerfile to rebuild from
       mockExistsSync.mockImplementation((p: unknown) => {
         const ps = String(p)
-        return ps.endsWith('docker-customization-hash') || ps.endsWith('docker-built-hash')
+        return ps.endsWith('docker-customization-hash') || ps.endsWith('docker-built-hash') || ps.endsWith('PROJ_A/.ai-support-agent/Dockerfile')
       })
       mockReadFileSync.mockImplementation((p: unknown) => {
         const ps = String(p)

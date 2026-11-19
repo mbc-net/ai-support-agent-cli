@@ -8,6 +8,36 @@
  */
 
 jest.mock('fs')
+// The no-follow helpers are tested against the real filesystem in
+// __tests__/utils/marker-file.spec.ts; here they forward to the mocked fs.
+jest.mock('../../src/utils/marker-file', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fsMock = require('fs') as typeof import('fs')
+  return {
+    MARKER_FILE_MAX_BYTES: 64 * 1024,
+    DOCKER_ASSET_MAX_BYTES: 1024 * 1024,
+    UnsafeFileError: class UnsafeFileError extends Error {},
+    assertRealDirectory: jest.fn(),
+    readMarkerFile: jest.fn((p: string) => {
+      try {
+        return String(fsMock.readFileSync(p, 'utf-8')).trim()
+      } catch {
+        return undefined
+      }
+    }),
+    ensureRealDirectoryChain: jest.fn(),
+    snapshotDockerfile: jest.fn((p: string) => (fsMock.existsSync(p) ? { path: p, cleanup: jest.fn() } : undefined)),
+    pathExistsNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    isRegularFileNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    readRegularFileNoFollow: jest.fn((p: string) => (fsMock.existsSync(p) ? fsMock.readFileSync(p) : undefined)),
+    writeFileNoFollow: jest.fn((p: string, content: string | Buffer) => fsMock.writeFileSync(p, content, 'utf-8')),
+    copyBundledFileNoFollow: jest.fn((src: string, dst: string) => fsMock.copyFileSync(src, dst)),
+    copyRegularFileNoFollow: jest.fn((src: string, dst: string) => {
+      fsMock.copyFileSync(src, dst)
+      return true
+    }),
+  }
+})
 jest.mock('../../src/logger')
 jest.mock('../../src/i18n', () => ({
   t: (key: string, params?: Record<string, string>) => {

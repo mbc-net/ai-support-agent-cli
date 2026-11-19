@@ -16,6 +16,8 @@ jest.mock('fs', () => ({
   existsSync: jest.fn().mockReturnValue(false),
   readFileSync: jest.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }),
   unlinkSync: jest.fn(),
+  rmdirSync: jest.fn(),
+  lstatSync: jest.fn(() => ({ isDirectory: () => true })),
   writeFileSync: jest.fn(),
   copyFileSync: jest.fn(),
   mkdirSync: jest.fn(),
@@ -142,6 +144,8 @@ jest.mock('../../src/docker/project-image-builder', () => ({
 }))
 
 jest.mock('../../src/utils/path-utils', () => ({
+  getBuildSnapshotsDir: jest.fn(() => '/mock/config-dir/.build-snapshots'),
+  prepareSnapshotsDir: jest.fn(),
   getProjectConfigHostDir: jest.fn(
     (tenantCode: string, projectCode: string) =>
       `/mock/config-dir/projects/${tenantCode}/${projectCode}/.ai-support-agent`,
@@ -176,6 +180,38 @@ jest.mock('../../src/utils', () => ({
           truncated: true,
         },
 }))
+
+// The no-follow file helpers are exercised against the real filesystem in
+// __tests__/utils/marker-file.spec.ts. Here they forward to the mocked fs so
+// these tests keep describing the supervisor's decisions; the forwarding also
+// lets them assert which helper the supervisor went through.
+jest.mock('../../src/utils/marker-file', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fsMock = require('fs') as typeof import('fs')
+  return {
+    MARKER_FILE_MAX_BYTES: 64 * 1024,
+    DOCKER_ASSET_MAX_BYTES: 1024 * 1024,
+    readMarkerFile: jest.fn((p: string) => {
+      try {
+        return String(fsMock.readFileSync(p, 'utf-8')).trim()
+      } catch {
+        return undefined
+      }
+    }),
+    UnsafeFileError: class UnsafeFileError extends Error {},
+    ensureRealDirectoryChain: jest.fn(),
+    writeFileNoFollow: jest.fn((p: string, content: string | Buffer) => fsMock.writeFileSync(p, content, 'utf-8')),
+    isRegularFileNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    pathExistsNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    copyRegularFileNoFollow: jest.fn((src: string, dst: string) => {
+      if (!fsMock.existsSync(src)) return false
+      fsMock.copyFileSync(src, dst)
+      return true
+    }),
+    snapshotDockerfile: jest.fn((p: string) =>
+      fsMock.existsSync(p) ? { path: p, cleanup: jest.fn() } : undefined),
+  }
+})
 
 import { spawn } from 'child_process'
 import * as fs from 'fs'
@@ -471,11 +507,12 @@ describe('DockerSupervisor', () => {
       processOnSpy.mockRestore()
     })
 
-    it('pre-startup hash mismatch triggers rebuild before spawn', () => {
-      // Both hash files exist, but differ → spawnProject should call rebuildAndRestart
+    it('pre-startup hash mismatch triggers rebuild before spawn', async () => {
+      // Both hash files exist, but differ, and there is a Dockerfile to build
+      // from → spawnProject should call rebuildAndRestart
       mockExistsSync.mockImplementation((p: unknown) => {
         const s = p as string
-        return s.endsWith('docker-customization-hash') || s.endsWith('docker-built-hash')
+        return s.endsWith('docker-customization-hash') || s.endsWith('docker-built-hash') || s.endsWith('Dockerfile')
       })
       mockReadFileSync.mockImplementation((p: unknown) => {
         const s = p as string
@@ -495,6 +532,9 @@ describe('DockerSupervisor', () => {
       expect(logger.info).toHaveBeenCalledWith(
         expect.stringContaining('Pre-startup hash mismatch'),
       )
+      // Let the asynchronous rebuild finish here instead of in the next test.
+      mockExistsSync.mockReturnValue(false)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
     })
 
     it('pre-startup hash match proceeds to spawn without rebuild', () => {
@@ -2094,6 +2134,10 @@ describe('DockerSupervisor', () => {
   // ─── docker-build-error retention after a successful build ───────────────
 
   describe('rebuildAndRestart - docker-build-error handling after a successful build', () => {
+    afterEach(() => {
+      mockUnlinkSync.mockReset()
+    })
+
     function arrangeExistingFiles(markerExists: boolean): { fakeChild1: ReturnType<typeof makeFakeChild> } {
       mockExistsSync.mockReset()
       mockReadFileSync.mockReset()
@@ -2130,6 +2174,32 @@ describe('DockerSupervisor', () => {
 
       expect(mockBuildProjectImage).toHaveBeenCalled()
       expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining('docker-build-error'))
+    })
+
+    it('ignores an already-absent docker-build-error silently', async () => {
+      const { fakeChild1 } = arrangeExistingFiles(true)
+      mockUnlinkSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-build-error')) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('stale build error file'))
+    })
+
+    it('logs a stale docker-build-error that cannot be removed (e.g. a directory planted there)', async () => {
+      const { fakeChild1 } = arrangeExistingFiles(true)
+      mockUnlinkSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-build-error')) throw Object.assign(new Error('EISDIR'), { code: 'EISDIR' })
+      })
+
+      new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Failed to remove the stale build error file .*docker-build-error: EISDIR/))
     })
 
     it('keeps docker-build-error when no rebuild was requested (Dockerfile generation failed in the container)', async () => {
@@ -2725,6 +2795,444 @@ describe('DockerSupervisor', () => {
       // Should have been called exactly once
       expect(mockSubmitLogChunk).toHaveBeenCalledTimes(1)
       expect(mockSubmitLogChunk.mock.calls[0][0].text).toBe('hello')
+    })
+  })
+
+  // ─── container-writable files are never followed through a symlink (§7.7) ─
+
+  describe('no-follow handling of the project config dir (design §7.7)', () => {
+    const markerFile = jest.requireMock('../../src/utils/marker-file') as {
+      UnsafeFileError: new (message: string) => Error
+      ensureRealDirectoryChain: jest.Mock
+      readMarkerFile: jest.Mock
+      isRegularFileNoFollow: jest.Mock
+      pathExistsNoFollow: jest.Mock
+      copyRegularFileNoFollow: jest.Mock
+      snapshotDockerfile: jest.Mock
+    }
+
+    afterEach(() => {
+      mockUnlinkSync.mockReset()
+    })
+
+    /** Rebuild marker and Dockerfile present; nothing else. */
+    function markerAndDockerfile(): void {
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return s.endsWith('docker-rebuild-needed') || s.endsWith('Dockerfile') || s.endsWith('docker-customization-hash')
+      })
+    }
+
+    async function triggerRebuild(): Promise<void> {
+      const fakeChild1 = makeFakeChild()
+      const fakeChild2 = makeFakeChild()
+      let n = 0
+      mockSpawn.mockImplementation(() => (++n === 1 ? fakeChild1 : fakeChild2) as never)
+      const supervisor = new DockerSupervisor('1.0.0', makeOpts())
+      supervisor.start([makeProject()])
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+    }
+
+    it('reads both pre-startup hashes through readMarkerFile', () => {
+      mockSpawn.mockReturnValue(makeFakeChild() as never)
+      new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+      const paths = markerFile.readMarkerFile.mock.calls.map((c: unknown[]) => String(c[0]))
+      expect(paths.some((p) => p.endsWith('docker-customization-hash'))).toBe(true)
+      expect(paths.some((p) => p.endsWith('docker-built-hash'))).toBe(true)
+    })
+
+    it('starts with the previous image instead of looping when the hashes differ but no Dockerfile exists', () => {
+      // rebuildAndRestart would have nothing to build from.
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return s.endsWith('docker-customization-hash') || s.endsWith('docker-built-hash')
+      })
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        if (s.endsWith('docker-customization-hash')) return 'hash-new'
+        if (s.endsWith('docker-built-hash')) return 'hash-old'
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+      mockSpawn.mockReturnValue(makeFakeChild() as never)
+
+      new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+      expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('Pre-startup hash mismatch'))
+    })
+
+    it('ignores a rebuild marker that is not a regular file: removes the link itself, logs why, builds nothing', async () => {
+      // Only the marker is present (as a symlink); the Dockerfile is absent.
+      mockExistsSync.mockImplementation((p: unknown) => (p as string).endsWith('docker-rebuild-needed'))
+      markerFile.isRegularFileNoFollow.mockImplementation(() => false)
+      try {
+        await triggerRebuild()
+      } finally {
+        markerFile.isRegularFileNoFollow.mockImplementation((p: string) => fs.existsSync(p))
+      }
+      expect(markerFile.isRegularFileNoFollow).toHaveBeenCalledWith(expect.stringContaining('docker-rebuild-needed'))
+      expect(mockBuildProjectImage).not.toHaveBeenCalled()
+      expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining('docker-rebuild-needed'))
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring the rebuild request of mbc/PROJ_A'))
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('removes an empty directory planted as the rebuild marker with rmdir (never a recursive remove)', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => (p as string).endsWith('docker-rebuild-needed'))
+      markerFile.isRegularFileNoFollow.mockImplementation(() => false)
+      mockUnlinkSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-rebuild-needed')) throw Object.assign(new Error('EISDIR'), { code: 'EISDIR' })
+      })
+      const rmdir = fs.rmdirSync as jest.Mock
+      rmdir.mockReset()
+      try {
+        await triggerRebuild()
+      } finally {
+        markerFile.isRegularFileNoFollow.mockImplementation((p: string) => fs.existsSync(p))
+      }
+      expect(rmdir).toHaveBeenCalledWith(expect.stringContaining('docker-rebuild-needed'))
+      expect(rmdir.mock.calls[0]).toHaveLength(1) // no { recursive: true }
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('Failed to remove'))
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('logs, and still restarts, when an irregular rebuild marker cannot be removed', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => (p as string).endsWith('docker-rebuild-needed'))
+      markerFile.isRegularFileNoFollow.mockImplementation(() => false)
+      mockUnlinkSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-rebuild-needed')) throw Object.assign(new Error('EISDIR'), { code: 'EISDIR' })
+      })
+      ;(fs.rmdirSync as jest.Mock).mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOTEMPTY'), { code: 'ENOTEMPTY' })
+      })
+      try {
+        await triggerRebuild()
+      } finally {
+        markerFile.isRegularFileNoFollow.mockImplementation((p: string) => fs.existsSync(p))
+      }
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Failed to remove .*docker-rebuild-needed: ENOTEMPTY/))
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not rmdir a marker that is not a directory when unlink reports EPERM (Linux: sticky dir, immutable file)', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => (p as string).endsWith('docker-rebuild-needed'))
+      markerFile.isRegularFileNoFollow.mockImplementation(() => false)
+      mockUnlinkSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-rebuild-needed')) throw Object.assign(new Error('EPERM'), { code: 'EPERM' })
+      })
+      ;(fs.lstatSync as jest.Mock).mockImplementationOnce(() => ({ isDirectory: () => false }))
+      const rmdir = fs.rmdirSync as jest.Mock
+      rmdir.mockReset()
+      try {
+        await triggerRebuild()
+      } finally {
+        markerFile.isRegularFileNoFollow.mockImplementation((p: string) => fs.existsSync(p))
+      }
+      expect(rmdir).not.toHaveBeenCalled()
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Failed to remove .*docker-rebuild-needed: EPERM/))
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not start the project when its config dir is not a real directory (e.g. swapped for a symlink)', () => {
+      markerFile.ensureRealDirectoryChain.mockImplementationOnce(() => {
+        throw new markerFile.UnsafeFileError('Not a real directory: /mock/config-dir/projects/mbc/PROJ_A/.ai-support-agent')
+      })
+      mockSpawn.mockReturnValue(makeFakeChild() as never)
+
+      new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+
+      // Only the level the container can swap is checked; the host-owned
+      // levels above (e.g. a symlinked projects/) stay the user's choice.
+      expect(markerFile.ensureRealDirectoryChain).toHaveBeenCalledWith(
+        '/mock/config-dir/projects/mbc/PROJ_A',
+        '/mock/config-dir/projects/mbc/PROJ_A/.ai-support-agent',
+      )
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Not starting mbc/PROJ_A: Not a real directory'))
+      expect(mockSpawn).not.toHaveBeenCalled()
+      expect(markerFile.readMarkerFile).not.toHaveBeenCalled()
+    })
+
+    it('checks the config dir again before a rebuild, and neither rebuilds nor restarts when it was swapped', async () => {
+      markerAndDockerfile()
+      const fakeChild1 = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild1 as never)
+      new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+      markerFile.ensureRealDirectoryChain.mockImplementationOnce(() => {
+        throw new markerFile.UnsafeFileError('Not a real directory: x')
+      })
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(mockBuildProjectImage).not.toHaveBeenCalled()
+      expect(markerFile.isRegularFileNoFollow).not.toHaveBeenCalledWith(expect.stringContaining('docker-rebuild-needed'))
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('logs, and still restarts, when an irregular rebuild marker cannot be unlinked for another reason', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => (p as string).endsWith('docker-rebuild-needed'))
+      markerFile.isRegularFileNoFollow.mockImplementation(() => false)
+      mockUnlinkSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-rebuild-needed')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+      })
+      try {
+        await triggerRebuild()
+      } finally {
+        markerFile.isRegularFileNoFollow.mockImplementation((p: string) => fs.existsSync(p))
+      }
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Failed to remove .*docker-rebuild-needed: EACCES/))
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('starts the previous image, and logs why, when the rebuild check itself fails (e.g. lstat EACCES)', async () => {
+      markerFile.isRegularFileNoFollow.mockImplementation(() => {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+      })
+      try {
+        await triggerRebuild()
+      } finally {
+        markerFile.isRegularFileNoFollow.mockImplementation((p: string) => fs.existsSync(p))
+      }
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Rebuild check failed for mbc/PROJ_A: EACCES'))
+      expect(mockBuildProjectImage).not.toHaveBeenCalled()
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('treats an lstat error on the project Dockerfile at pre-start as present, so the rebuild path records it', async () => {
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        if (s.endsWith('docker-customization-hash')) return 'hash-new'
+        if (s.endsWith('docker-built-hash')) return 'hash-old'
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+      mockExistsSync.mockImplementation((p: unknown) => (p as string).endsWith('-hash'))
+      markerFile.pathExistsNoFollow.mockImplementation((p: string) => {
+        if (p.endsWith('Dockerfile')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+        return fs.existsSync(p)
+      })
+      markerFile.snapshotDockerfile.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+      })
+      mockSpawn.mockReturnValue(makeFakeChild() as never)
+      try {
+        new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+        for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+      } finally {
+        markerFile.pathExistsNoFollow.mockImplementation((p: string) => fs.existsSync(p))
+      }
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Cannot check .*Dockerfile: EACCES/))
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-build-error'),
+        expect.stringMatching(/^Failed to prepare .*Dockerfile for the build: EACCES/),
+        'utf-8',
+      )
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('records a problem with the snapshots directory as a failed preparation, not a refused Dockerfile', async () => {
+      markerAndDockerfile()
+      const pathUtils = jest.requireMock('../../src/utils/path-utils') as { prepareSnapshotsDir: jest.Mock }
+      pathUtils.prepareSnapshotsDir.mockImplementationOnce(() => {
+        throw new markerFile.UnsafeFileError('Not a real directory: /mock/config-dir/.build-snapshots')
+      })
+
+      await triggerRebuild()
+
+      expect(markerFile.snapshotDockerfile).not.toHaveBeenCalled()
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-build-error'),
+        expect.stringMatching(/^Failed to prepare .*\.build-snapshots for the build: Not a real directory/),
+        'utf-8',
+      )
+      expect(markerFile.copyRegularFileNoFollow).not.toHaveBeenCalledWith(
+        expect.stringContaining('docker-customization-hash'),
+        expect.anything(),
+        expect.anything(),
+      )
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('removes a stale container of the project before checking its config dir', () => {
+      const dockerUtils = jest.requireMock('../../src/docker/docker-utils') as { removeStaleContainer: jest.Mock }
+      const order: string[] = []
+      dockerUtils.removeStaleContainer.mockImplementationOnce(() => order.push('remove'))
+      markerFile.ensureRealDirectoryChain.mockImplementationOnce(() => order.push('check'))
+      mockSpawn.mockReturnValue(makeFakeChild() as never)
+
+      new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+
+      expect(order).toEqual(['remove', 'check'])
+    })
+
+    it('exits (like the last normal exit) when a restarted project is refused and nothing else runs', async () => {
+      const fakeChild1 = makeFakeChild()
+      mockSpawn.mockReturnValue(fakeChild1 as never)
+      new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+      markerFile.ensureRealDirectoryChain.mockImplementationOnce(() => {
+        throw new markerFile.UnsafeFileError('Not a real directory: x')
+      })
+
+      fakeChild1.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(logger.error).toHaveBeenCalledWith('[docker] No project container is running; exiting.')
+      expect(mockExit).toHaveBeenCalledWith(1)
+    })
+
+    it('does not exit when a restarted project is refused while another project still runs', async () => {
+      const childA = makeFakeChild()
+      const childB = makeFakeChild()
+      let n = 0
+      mockSpawn.mockImplementation(() => (++n === 1 ? childA : childB) as never)
+      new DockerSupervisor('1.0.0', makeOpts()).start([
+        makeProject(),
+        { ...makeProject(), projectCode: 'PROJ_B' },
+      ])
+      markerFile.ensureRealDirectoryChain.mockImplementationOnce(() => {
+        throw new markerFile.UnsafeFileError('Not a real directory: x')
+      })
+
+      childA.emit('close', 43)
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+
+      expect(mockExit).not.toHaveBeenCalled()
+    })
+
+    it('still rebuilds when the rebuild marker vanishes between the check and the unlink', async () => {
+      markerAndDockerfile()
+      mockUnlinkSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-rebuild-needed')) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+
+      await triggerRebuild()
+
+      expect(mockBuildProjectImage).toHaveBeenCalledTimes(1)
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('docker-rebuild-needed'))
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('logs a rebuild marker that cannot be removed for another reason, and still rebuilds', async () => {
+      markerAndDockerfile()
+      mockUnlinkSync.mockImplementation((p: unknown) => {
+        if (String(p).endsWith('docker-rebuild-needed')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+      })
+
+      await triggerRebuild()
+
+      expect(mockBuildProjectImage).toHaveBeenCalledTimes(1)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/Failed to remove .*docker-rebuild-needed: EACCES/))
+    })
+
+    it('refuses a Dockerfile swapped for a symlink: no build, the reason is recorded, the hash is marked built, and the container restarts', async () => {
+      markerAndDockerfile()
+      markerFile.snapshotDockerfile.mockImplementationOnce(() => {
+        throw new markerFile.UnsafeFileError('Refusing to read a non-regular file: /x/Dockerfile')
+      })
+
+      await triggerRebuild()
+
+      expect(mockBuildProjectImage).not.toHaveBeenCalled()
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-build-error'),
+        expect.stringContaining('Refusing to build from'),
+        'utf-8',
+      )
+      expect(markerFile.copyRegularFileNoFollow).toHaveBeenCalledWith(
+        expect.stringContaining('docker-customization-hash'),
+        expect.stringContaining('docker-built-hash'),
+        64 * 1024,
+      )
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('records an I/O failure while preparing the snapshot as such, not as a refusal', async () => {
+      markerAndDockerfile()
+      markerFile.snapshotDockerfile.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
+      })
+
+      await triggerRebuild()
+
+      expect(mockBuildProjectImage).not.toHaveBeenCalled()
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-build-error'),
+        expect.stringMatching(/^Failed to prepare .*Dockerfile for the build: ENOSPC/),
+        'utf-8',
+      )
+      // Not marked as built: the next start retries the build.
+      expect(markerFile.copyRegularFileNoFollow).not.toHaveBeenCalledWith(
+        expect.stringContaining('docker-customization-hash'),
+        expect.anything(),
+        expect.anything(),
+      )
+      expect(mockSpawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('logs and carries on when the built hash cannot be recorded, without looping back into a rebuild', async () => {
+      markerAndDockerfile()
+      // The hashes stay different because recording the built hash fails.
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        if (s.endsWith('docker-customization-hash')) return 'hash-new'
+        if (s.endsWith('docker-built-hash')) return 'hash-old'
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        return s.endsWith('docker-rebuild-needed') || s.endsWith('Dockerfile') || s.endsWith('-hash')
+      })
+      markerFile.copyRegularFileNoFollow.mockImplementation((src: string, dst: string) => {
+        if (dst.endsWith('docker-built-hash')) throw new Error('EISDIR: docker-built-hash.tmp')
+        return false
+      })
+      try {
+        // First start: the mismatch sends it to rebuildAndRestart (build 1),
+        // which must then start the container rather than re-check the hashes.
+        const fakeChild = makeFakeChild()
+        mockSpawn.mockReturnValue(fakeChild as never)
+        new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+        for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+      } finally {
+        markerFile.copyRegularFileNoFollow.mockImplementation((src: string, dst: string) => {
+          if (!fs.existsSync(src)) return false
+          fs.copyFileSync(src, dst)
+          return true
+        })
+      }
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to record the built hash for mbc/PROJ_A'))
+      expect(mockBuildProjectImage).toHaveBeenCalledTimes(1)
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('sends a hash mismatch with a symlinked Dockerfile to the refusal path, which records why', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => (p as string).endsWith('-hash'))
+      markerFile.pathExistsNoFollow.mockImplementation((p: string) => p.endsWith('Dockerfile') || fs.existsSync(p))
+      mockReadFileSync.mockImplementation((p: unknown) => {
+        const s = p as string
+        if (s.endsWith('docker-customization-hash')) return 'hash-new'
+        if (s.endsWith('docker-built-hash')) return 'hash-old'
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      })
+      markerFile.snapshotDockerfile.mockImplementationOnce(() => {
+        throw new markerFile.UnsafeFileError('Refusing to read a non-regular file: Dockerfile')
+      })
+      mockSpawn.mockReturnValue(makeFakeChild() as never)
+      try {
+        new DockerSupervisor('1.0.0', makeOpts()).start([makeProject()])
+        for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+      } finally {
+        markerFile.pathExistsNoFollow.mockImplementation((p: string) => fs.existsSync(p))
+      }
+
+      expect(mockBuildProjectImage).not.toHaveBeenCalled()
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('docker-build-error'),
+        expect.stringContaining('Refusing to build from'),
+        'utf-8',
+      )
+      expect(mockSpawn).toHaveBeenCalledTimes(1)
     })
   })
 })
