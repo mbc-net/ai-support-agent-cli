@@ -1,3 +1,4 @@
+import type { SshSourceIpPayload } from '../server-setup/ssh-source-ip-sync'
 import type { ChatPayload } from './chat'
 import type { EcsLaunchPayload, EcsStopPayload } from './ecs'
 import type { ServerSetupExecPayload } from './server-setup'
@@ -24,6 +25,8 @@ export type AgentCommandType =
   | 'sync_repository'
   | 'ecs_launch'
   | 'ecs_stop'
+  | 'ssh_source_ip_sync'
+  | 'ssh_source_ip_inspect'
   | 'server_setup_exec'
   | 'server_setup_cancel'
   | 'ssh_exec'
@@ -59,6 +62,9 @@ export type CommandResult = (
   | { success: true; data: unknown }
   | { success: false; error: string; data?: unknown }
 ) & {
+  /** Dedicated SSH policy receipt, persisted before submitting and omitted from ordinary result wire data. */
+  sshSourceIpInspectionCompletion?: import('../server-setup/ssh-source-ip-sync').SshSourceIpInspectionResult
+  sshSourceIpCompletion?: import('../server-setup/ssh-source-ip-sync').SshSourceIpResult
   /** Internal agent proof: attached only after E2E child processes have closed.
    * Persisted with pending results, stripped before submitting the result body. */
   e2eConfigurationCompletion?: { executionId: string }
@@ -195,6 +201,8 @@ export type CommandDispatch =
   | { type: 'sync_repository'; payload: SyncRepositoryPayload }
   | { type: 'ecs_launch'; payload: EcsLaunchPayload }
   | { type: 'ecs_stop'; payload: EcsStopPayload }
+  | { type: 'ssh_source_ip_sync'; payload: SshSourceIpPayload }
+  | { type: 'ssh_source_ip_inspect'; payload: SshSourceIpPayload }
   | { type: 'server_setup_exec'; payload: ServerSetupExecPayload }
   | { type: 'server_setup_cancel'; payload: ServerSetupCancelPayload }
   | { type: 'ssh_exec'; payload: SshExecPayload }
