@@ -275,6 +275,17 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     return ecsStop(p)
   },
 
+  ssh_source_ip_sync: async ({ p, opts }) => {
+    if (!opts.commandId || !opts.client) return errorResult('SSH policy requires client context')
+    const { runSshSourceIpSync } = await import('../server-setup/ssh-source-ip-sync')
+    return runSshSourceIpSync(p, {commandId:opts.commandId,client:opts.client,agentId:opts.agentId})
+  },
+  ssh_source_ip_inspect: async ({ p, opts }) => {
+    if (!opts.commandId || !opts.client) return errorResult('SSH policy inspection requires client context')
+    const { runSshSourceIpSync } = await import('../server-setup/ssh-source-ip-sync')
+    return runSshSourceIpSync(p, {commandId:opts.commandId,client:opts.client,agentId:opts.agentId}, true)
+  },
+
   server_setup_exec: async ({ p, opts }) => {
     // Loaded lazily so agents that never run server setup do not pay the
     // Ansible dispatch cost. Payload/response may involve an SSH private
