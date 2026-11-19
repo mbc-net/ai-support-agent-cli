@@ -19,6 +19,7 @@
  */
 
 import { EventEmitter } from 'events'
+import { createHash } from 'crypto'
 
 class FakeSshStream extends EventEmitter {
   stderr = new EventEmitter()
@@ -77,6 +78,7 @@ function directCredential(overrides: Partial<SshExecCredential> = {}): SshExecCr
     // `enum: ['password', 'privateKey']`).
     authType: 'privateKey',
     privateKey: PRIVATE_KEY,
+    hostKeyFingerprint: `SHA256:${createHash('sha256').update('trusted-key').digest('base64').replace(/=+$/, '')}`,
     ...overrides,
   }
 }
@@ -110,6 +112,12 @@ beforeEach(() => {
 })
 
 describe('executeSshCommand', () => {
+  it('rejects missing pins before SSH or Tailscale network access', async () => {
+    await expect(executeSshCommand(tailscaleCredential({ hostKeyFingerprint: undefined }), 'echo test')).rejects.toThrow('hostKeyFingerprint')
+    expect(mockCreateConnection).not.toHaveBeenCalled()
+    expect(mockClientCtor).not.toHaveBeenCalled()
+  })
+
   describe('direct connection (no tailnetHostname)', () => {
     it('connects with host/port and no sock option', async () => {
       const promise = executeSshCommand(directCredential(), 'echo hi', 5)
@@ -118,6 +126,9 @@ describe('executeSshCommand', () => {
 
       expect(mockCreateConnection).not.toHaveBeenCalled()
       const connectConfig = lastClient!.connect.mock.calls[0][0]
+      expect(connectConfig.hostVerifier).toEqual(expect.any(Function))
+      expect(connectConfig.hostVerifier(Buffer.from('trusted-key'))).toBe(true)
+      expect(connectConfig.hostVerifier(Buffer.from('attacker-key'))).toBe(false)
       expect(connectConfig.host).toBe('203.0.113.10')
       expect(connectConfig.port).toBe(22)
       expect(connectConfig.sock).toBeUndefined()

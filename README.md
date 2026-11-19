@@ -329,6 +329,22 @@ Each project gets an isolated workspace:
 
 ## Security
 
+SSH command execution and SSH-backed DB/RDP tunnels require a trusted
+`hostKeyFingerprint` (`SHA256:` plus the unpadded OpenSSH fingerprint) in the host
+configuration. Before upgrading, obtain each fingerprint from the server console
+or another authenticated management channel and save it in the SSH host settings.
+Missing, malformed, and changed pins block these connections. Explicitly update
+the pin after a verified host-key rotation; do not trust `ssh-keyscan` output alone.
+Interactive OpenSSH terminals and server setup retain their persistent known_hosts policy.
+
+Local browser IPC now requires a per-process bearer token. The agent automatically
+passes `AI_SUPPORT_BROWSER_LOCAL_TOKEN` together with `AI_SUPPORT_BROWSER_LOCAL_PORT`
+to its MCP children and protected per-command configuration. Custom IPC clients
+must send `Authorization: Bearer <token>`; knowing the loopback port is insufficient.
+Do not log or share the token. Browser-origin requests are rejected, and JSON
+request bodies are limited to 1 MiB.
+
+
 | Layer | Detail |
 |-------|--------|
 | Authentication | Browser-based OAuth with localhost callback, CSRF nonce |
@@ -459,3 +475,5 @@ Sentry admission closure additionally requires the original Ansible run to finis
 A settled remote snapshot after cancellation, timeout or other failed execution does not
 exclude an already-dispatched delayed remote start. Such admissions remain unresolved
 until stronger remote fencing or independently verified operational termination is available.
+
+SSH資格情報取得API側でもpin登録が必須になるため、OpenSSH terminal/server-setupを使う場合も先に `hostKeyFingerprint` を登録してください。これらの実接続の鍵検証は既存の `known_hosts` 方式を維持します。

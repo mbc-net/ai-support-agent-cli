@@ -886,6 +886,7 @@ describe('processCommand: getOrCreateBrowserSession/closeBrowserSession wiring',
   function createMockVsCodeWs() {
     return {
       getBrowserLocalPort: jest.fn().mockReturnValue(12345),
+      getBrowserLocalToken: jest.fn().mockReturnValue('fixture-browser-token'),
       browserSessionManager: {
         getOrCreate: jest.fn().mockResolvedValue(undefined),
         close: jest.fn().mockResolvedValue(undefined),

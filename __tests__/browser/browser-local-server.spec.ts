@@ -1,4 +1,6 @@
 import http from 'http'
+import { Readable } from 'stream'
+import { BrowserProxySession } from '../../src/mcp/tools/browser/browser-proxy-session'
 
 import { ActionLogNotification, BrowserLocalServer } from '../../src/browser/browser-local-server'
 import { BrowserSessionManager } from '../../src/mcp/tools/browser/browser-session-manager'
@@ -8,9 +10,11 @@ jest.mock('../../src/mcp/tools/browser/browser-security', () => ({
   validateUrl: jest.fn().mockReturnValue({ valid: true }),
 }))
 
-function httpRequest(port: number, method: string, path: string, body?: string): Promise<{ status: number; body: Record<string, unknown> }> {
+let authToken = ''
+
+function httpRequest(port: number, method: string, path: string, body?: string, token = authToken, extraHeaders: Record<string, string> = {}): Promise<{ status: number; body: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ hostname: '127.0.0.1', port, method, path, headers: { 'Content-Type': 'application/json' } }, (res) => {
+    const req = http.request({ hostname: '127.0.0.1', port, method, path, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...extraHeaders } }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', (chunk: Buffer) => chunks.push(chunk))
       res.on('end', () => {
@@ -62,6 +66,7 @@ describe('BrowserLocalServer', () => {
     jest.spyOn(manager, 'get').mockReturnValue(mockSession as never)
     server = new BrowserLocalServer(manager)
     port = await server.start()
+    authToken = server.getAuthToken()
   })
 
   afterAll(async () => {
@@ -74,7 +79,44 @@ describe('BrowserLocalServer', () => {
     mockSession.variables.clear()
   })
 
-  it('should start on a random port', () => {
+  it('rejects unauthenticated session enumeration', async () => {
+    jest.spyOn(manager, 'listSessions').mockReturnValue([{ sessionId: 'secret' }] as never)
+    const res = await httpRequest(port, 'GET', '/sessions/first', undefined, '')
+    expect(res.status).toBe(401)
+    expect(manager.listSessions).not.toHaveBeenCalled()
+  })
+
+  it('rejects incorrect tokens before exposing browser variables', async () => {
+    const res = await httpRequest(port, 'GET', '/browser/sess-1/variables', undefined, 'wrong-token')
+    expect(res.status).toBe(401)
+    expect(manager.get).not.toHaveBeenCalled()
+  })
+
+  it('rejects browser origins even with a valid token', async () => {
+    const res = await httpRequest(port, 'GET', '/sessions/first', undefined, authToken, { Origin: 'https://untrusted.example' })
+    expect(res.status).toBe(403)
+  })
+
+  it('rejects non-JSON writes and oversized bodies', async () => {
+    expect((await httpRequest(port, 'POST', '/browser/sess-1/fill', '{}', authToken, { 'Content-Type': 'text/plain' })).status).toBe(415)
+    expect((await httpRequest(port, 'POST', '/browser/sess-1/fill', 'x'.repeat(1024 * 1024 + 1))).status).toBe(413)
+  })
+
+  it('authenticates real proxy reads and writes using the child process token', async () => {
+    const previous = process.env.AI_SUPPORT_BROWSER_LOCAL_TOKEN
+    process.env.AI_SUPPORT_BROWSER_LOCAL_TOKEN = authToken
+    try {
+      const proxy = new BrowserProxySession(`http://127.0.0.1:${port}`, 'sess-1')
+      await proxy.fill('#name', 'Alice')
+      expect(mockPage.fill).toHaveBeenCalled()
+      expect(await proxy.getUrl()).toBe('https://example.com')
+    } finally {
+      if (previous === undefined) delete process.env.AI_SUPPORT_BROWSER_LOCAL_TOKEN
+      else process.env.AI_SUPPORT_BROWSER_LOCAL_TOKEN = previous
+    }
+  })
+
+  it('should start on a random port' , () => {
     expect(port).toBeGreaterThan(0)
     expect(server.getPort()).toBe(port)
   })
@@ -400,29 +442,13 @@ describe('BrowserLocalServer', () => {
   describe('request with null url', () => {
     it('should fallback to / when req.url is undefined', async () => {
       // Directly call the private handleRequest method with a fake req whose url is undefined
-      const fakeReq = {
+      const fakeReq = Object.assign(Readable.from([]), {
         url: undefined,
-        on: jest.fn().mockImplementation(function (this: { listeners: Record<string, (() => void)[]> }, event: string, cb: (...args: unknown[]) => void) {
-          if (!this.listeners) this.listeners = {}
-          if (!this.listeners[event]) this.listeners[event] = []
-          this.listeners[event].push(cb as () => void)
-          return fakeReq
-        }),
-        emit: jest.fn(),
-      }
-      // Trigger the 'end' event so readBody resolves with empty string
-      const fakeRes = {
-        writeHead: jest.fn(),
-        end: jest.fn(),
-      }
-      // Call private handleRequest directly via type cast
-      const handleRequest = (server as unknown as { handleRequest: (req: unknown, res: unknown) => Promise<void> }).handleRequest.bind(server)
-
-      // Patch the req.on to immediately call the 'end' callback
-      ;(fakeReq.on as jest.Mock).mockImplementation((event: string, cb: (...args: unknown[]) => void) => {
-        if (event === 'end') setImmediate(() => cb())
-        return fakeReq
+        method: 'GET',
+        headers: { authorization: `Bearer ${authToken}` },
       })
+      const fakeRes = { writeHead: jest.fn(), end: jest.fn() }
+      const handleRequest = (server as unknown as { handleRequest: (req: unknown, res: unknown) => Promise<void> }).handleRequest.bind(server)
 
       await handleRequest(fakeReq, fakeRes)
       // Should have sent a 404 response (no matching route for '/')

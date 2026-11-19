@@ -7,6 +7,7 @@
  */
 
 import http from 'http'
+import { randomBytes, timingSafeEqual } from 'crypto'
 
 import { LOCALHOST_ADDRESS } from '../constants'
 import { logger } from '../logger'
@@ -27,7 +28,6 @@ import {
 import { screenshotToBase64 } from '../mcp/tools/mcp-response'
 import { getAddressPort } from '../utils'
 import { sendJson } from '../utils/http-response'
-import { streamToBuffer } from '../utils/stream-collect'
 import { executePlaywrightScript } from './browser-script-executor'
 
 /** Action log entry emitted to the caller */
@@ -39,6 +39,11 @@ export interface ActionLogNotification {
 export class BrowserLocalServer {
   private server: http.Server | null = null
   private port = 0
+  private readonly authToken = randomBytes(32).toString('hex')
+
+  getAuthToken(): string {
+    return this.authToken
+  }
   onActionLog: ((notification: ActionLogNotification) => void) | null = null
 
   constructor(private readonly sessionManager: BrowserSessionManager) {}
@@ -100,6 +105,25 @@ export class BrowserLocalServer {
 
   private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
+      const expected = Buffer.from(`Bearer ${this.authToken}`)
+      const received = Buffer.from(req.headers.authorization ?? '')
+      if (received.length !== expected.length || !timingSafeEqual(received, expected)) {
+        sendJson(res, 401, { error: 'Unauthorized' })
+        return
+      }
+      // IPC clients never send Origin; browsers must not operate this endpoint.
+      if (req.headers.origin) {
+        sendJson(res, 403, { error: 'Browser origins are not allowed' })
+        return
+      }
+      if (req.method !== 'GET' && req.method !== 'POST') {
+        sendJson(res, 405, { error: 'Method not allowed' })
+        return
+      }
+      if (req.method === 'POST' && req.headers['content-type']?.split(';')[0].trim() !== 'application/json') {
+        sendJson(res, 415, { error: 'Expected application/json' })
+        return
+      }
       const body = await readBody(req)
       const url = new URL(req.url ?? '/', `http://localhost:${this.port}`)
       const segments = url.pathname.split('/').filter(Boolean)
@@ -181,7 +205,7 @@ export class BrowserLocalServer {
       }
     } catch (error) {
       logger.error(`[browser-local-server] Request error: ${String(error)}`)
-      sendJson(res, 500, { error: String(error) })
+      sendJson(res, error instanceof RequestBodyTooLarge ? 413 : 500, { error: String(error) })
     }
   }
 
@@ -366,6 +390,18 @@ export class BrowserLocalServer {
   }
 }
 
-function readBody(req: http.IncomingMessage): Promise<string> {
-  return streamToBuffer(req).then((buf) => buf.toString())
+class RequestBodyTooLarge extends Error {}
+
+async function readBody(req: http.IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+    size += chunk.length
+    if (size > 1024 * 1024) {
+      req.resume()
+      throw new RequestBodyTooLarge('Request body exceeds 1 MiB')
+    }
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks).toString()
 }

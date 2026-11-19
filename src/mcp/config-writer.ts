@@ -201,6 +201,7 @@ export function writeMcpConfig(
   backlogConfigs?: BacklogMcpConfig[],
   tenantCode?: string,
   browserLocalPort?: number,
+  browserLocalToken?: string,
 ): string {
   const configPath = getMcpConfigPath(projectDir)
   const dir = dirname(configPath)
@@ -226,6 +227,7 @@ export function writeMcpConfig(
           AI_SUPPORT_AGENT_TENANT_CODE: resolvedTenantCode,
           ...(browserLocalPort && {
             [BROWSER_LOCAL_PORT_ENV]: String(browserLocalPort),
+            ...(browserLocalToken && { AI_SUPPORT_BROWSER_LOCAL_TOKEN: browserLocalToken }),
           }),
         },
       },
@@ -324,6 +326,7 @@ export function writeCommandMcpConfig(
    * {@link ASSIGNMENT_INSTANCE_ID_ENV}).
    */
   assignment?: { instanceId: string; generation: number },
+  browserLocal?: { port: number; token: string },
 ): string {
   const raw = readFileSync(baseConfigPath, 'utf-8')
   const config = JSON.parse(raw) as McpConfigFile
@@ -333,6 +336,10 @@ export function writeCommandMcpConfig(
     server.env = {
       ...(server.env ?? {}),
       [CONVERSATION_ID_ENV]: conversationId,
+      ...(browserLocal && {
+        [BROWSER_LOCAL_PORT_ENV]: String(browserLocal.port),
+        AI_SUPPORT_BROWSER_LOCAL_TOKEN: browserLocal.token,
+      }),
       ...(taskId && { [TASK_ID_ENV]: taskId }),
       [KNOWLEDGE_COMMAND_ID_ENV]: commandId,
       ...(agentId && { [KNOWLEDGE_AGENT_ID_ENV]: agentId }),

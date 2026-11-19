@@ -586,6 +586,7 @@ export class ProjectAgent {
   async performConfigSync(commandId?: string): Promise<void> {
     // ブラウザローカルポートを動的に更新（VSCode tunnel接続後に判明）
     this.configSyncDeps.browserLocalPort = this.transportState.vsCodeWs?.getBrowserLocalPort()
+    this.configSyncDeps.browserLocalToken = this.transportState.vsCodeWs?.getBrowserLocalToken()
     // API通知の configHash はRDS同期前の古い値の可能性があるため、
     // config_update を受け取ったときは currentConfigHash をリセットして強制再同期する
     this.configSyncState.currentConfigHash = undefined

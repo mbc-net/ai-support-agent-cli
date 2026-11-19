@@ -69,3 +69,19 @@ Validation: `node .github/scripts/npm-audit-gate.js --audit-level=high`,
 `npm audit --omit=dev`, and the Glob/Grep security and compatibility tests.
 This mitigation does not claim that all lower-severity development or production
 dependency advisories have been resolved.
+
+## SSH host-key pins and local browser IPC
+
+The ssh2 command, database tunnel, and SSH-backed RDP paths require a trusted
+`hostKeyFingerprint` in OpenSSH `SHA256:` format. Configure this value from the
+server console or another authenticated management channel before upgrading.
+Missing, malformed, or changed pins refuse the connection before authentication;
+never copy a fingerprint learned from an unverified connection. Rotate the stored
+pin explicitly when the server host key changes. OpenSSH-based interactive terminal
+and server setup paths continue using their existing persistent known_hosts policy.
+
+The browser IPC listener binds to loopback and requires a random bearer token.
+The agent supplies it to its MCP clients through protected configuration and child
+environment (`AI_SUPPORT_BROWSER_LOCAL_TOKEN`). Direct integrations must supply
+that token; a local port number alone no longer authorizes browser operations.
+Browser-origin requests are rejected and request bodies are limited to 1 MiB.
