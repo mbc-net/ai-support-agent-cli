@@ -34,6 +34,7 @@ export interface RdpSshTunnel {
     port: number
     username: string
     authType: 'privateKey' | 'password'
+    hostKeyFingerprint?: string
     /** Private key or password. Never logged. */
     credential: string
   }
@@ -84,7 +85,7 @@ const SSH_AUTH_TYPES = ['privateKey', 'password'] as const
 
 /** Keys each kind's `via` may carry. A key outside the set means the shapes disagree. */
 const VIA_KEYS: Record<RdpTunnelKind, readonly string[]> = {
-  ssh: ['hostId', 'hostname', 'port', 'username', 'authType', 'credential'],
+  ssh: ['hostId', 'hostname', 'port', 'username', 'authType', 'credential', 'hostKeyFingerprint'],
   ssm: ['hostId', 'instanceId', 'region', 'awsCredentials'],
   tailscale: ['hostId', 'authKey'],
 }
@@ -163,6 +164,7 @@ function parseSshVia(via: Json): RdpSshTunnel['via'] {
     username,
     authType: authType as RdpSshTunnel['via']['authType'],
     credential,
+    ...(typeof via.hostKeyFingerprint === 'string' && { hostKeyFingerprint: via.hostKeyFingerprint }),
   }
 }
 

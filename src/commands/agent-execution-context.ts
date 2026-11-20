@@ -35,6 +35,7 @@ export interface AgentExecutionContext {
    */
   projectCode?: string
   browserLocalPort?: number
+  browserLocalToken?: string
 }
 
 /**
@@ -61,6 +62,7 @@ export function forwardAgentExecutionContext(
     tenantCode: source.tenantCode,
     projectCode: source.projectCode,
     browserLocalPort: source.browserLocalPort,
+    browserLocalToken: source.browserLocalToken,
     ...overrides,
   }
 }

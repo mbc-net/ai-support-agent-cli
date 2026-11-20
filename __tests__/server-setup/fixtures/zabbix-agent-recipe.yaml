@@ -63,7 +63,7 @@ body: |
         \ 'TLSKeyFile=', 'TLSCertFile=', 'TLSCAFile=')):\n            secret_path = pathlib.Path(line.split('=', 1)[1].strip())\n\
         \            if secret_path.is_symlink() or not secret_path.resolve().is_relative_to(base): raise SystemExit('External\
         \ TLS file requires manual backup/review')\n        elif path != conf and not re.fullmatch(r'Plugins\\.[A-Za-z0-9_]+\\\
-        .System\\.Path=/usr/sbin/zabbix-agent2-plugin-[A-Za-z0-9_-]+', line):\n            raise SystemExit('Custom\
+        .System\\.Path=/usr/(?:sbin|libexec/zabbix)/zabbix-agent2-plugin-[A-Za-z0-9_-]+', line):\n            raise SystemExit('Custom\
         \ Include directives require manual review; no configuration changed')\ninspect(conf)\n# Every running Agent\
         \ process must belong to the one packaged systemd service.\nunit = 'zabbix-agent2.service' if variant == 'agent2'\
         \ else 'zabbix-agent.service'\nservice = subprocess.run(['systemctl', 'show', unit, '-p', 'FragmentPath',\

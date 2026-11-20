@@ -1,3 +1,4 @@
+import { createSshHostVerifier } from '../utils/ssh-host-key'
 /**
  * Ad-hoc SSH command executor used by the `ssh_exec` command handler (see
  * `commands/index.ts`). Ports the timeout / stdout+stderr aggregation /
@@ -106,6 +107,8 @@ export async function executeSshCommand(
   // Resolved (and, for Tailscale, connected) before the ssh2 Client is even
   // constructed: a SOCKS5 failure must surface as-is, not as a subsequent
   // ssh2 'error' event that could read as a plain connection error.
+  const hostVerifier = createSshHostVerifier(credential.hostKeyFingerprint)
+
   const sock = credential.connectionType === 'tailscale'
     ? await createTailscaleSocksSocket(credential)
     : undefined
@@ -164,6 +167,7 @@ export async function executeSshCommand(
     })
 
     const connectConfig: Record<string, unknown> = {
+      hostVerifier,
       username: credential.username,
       readyTimeout: timeoutSeconds * 1000,
       ...(credential.authType === 'password'

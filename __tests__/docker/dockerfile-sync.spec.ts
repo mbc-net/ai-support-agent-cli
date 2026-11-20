@@ -54,6 +54,30 @@ jest.mock('../../src/utils', () => ({
   }),
 }))
 
+// The no-follow helpers are exercised against the real filesystem in
+// __tests__/utils/marker-file.spec.ts and dockerfile-sync-nofollow.spec.ts.
+// Here they forward to the mocked fs, so these tests keep describing the sync
+// decisions (and copyFileSync still records what was copied where).
+jest.mock('../../src/utils/marker-file', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fsMock = require('fs') as typeof import('fs')
+  return {
+    MARKER_FILE_MAX_BYTES: 64 * 1024,
+    DOCKER_ASSET_MAX_BYTES: 1024 * 1024,
+    assertRealDirectory: jest.fn(),
+    ensureRealDirectoryChain: jest.fn(),
+    pathExistsNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    isRegularFileNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    readRegularFileNoFollow: jest.fn((p: string) => (fsMock.existsSync(p) ? fsMock.readFileSync(p) : undefined)),
+    writeFileNoFollow: jest.fn((p: string, content: string | Buffer) => fsMock.writeFileSync(p, content, 'utf-8')),
+    copyBundledFileNoFollow: jest.fn((src: string, dst: string) => fsMock.copyFileSync(src, dst)),
+    copyRegularFileNoFollow: jest.fn((src: string, dst: string) => {
+      fsMock.copyFileSync(src, dst)
+      return true
+    }),
+  }
+})
+
 import * as crypto from 'crypto'
 import * as fs from 'fs'
 import { hasUnmanagedConfigDockerfile, isDockerfileCustomized, syncDockerfileToConfigDir } from '../../src/docker/dockerfile-sync'
@@ -162,6 +186,19 @@ describe('dockerfile-sync', () => {
           combinedSha256(BUNDLED_CONTENT, ENTRYPOINT_CONTENT),
           'utf-8',
         )
+      })
+
+      it('should warn and not record a hash when a bundled file vanishes before it is copied', () => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const markerFile = require('../../src/utils/marker-file') as { copyBundledFileNoFollow: jest.Mock }
+        markerFile.copyBundledFileNoFollow.mockImplementationOnce(() => {
+          throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })
+        })
+
+        syncDockerfileToConfigDir()
+
+        expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileSyncFailed'))
+        expect(mockedFs.writeFileSync).not.toHaveBeenCalledWith(HASH_FILE, expect.anything(), 'utf-8')
       })
 
       it('should sync the Dockerfile alone (no throw) when the bundle has no entrypoint.sh', () => {
@@ -601,6 +638,28 @@ describe('dockerfile-sync', () => {
         syncDockerfileToConfigDir()
 
         expect(logger.warn).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('hash file vanishes between the existence checks and the read', () => {
+      it('takes the first-run branch instead of misjudging the pair as customised', () => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const markerFile = require('../../src/utils/marker-file') as { readRegularFileNoFollow: jest.Mock }
+        mockedFs.existsSync.mockImplementation((p: unknown) => String(p) === HASH_FILE || String(p) === DEST_DOCKERFILE)
+        mockedFs.readFileSync.mockImplementation((p: unknown): string | Buffer => {
+          if (p === DEST_DOCKERFILE) return Buffer.from(OLD_BUNDLED_CONTENT)
+          if (p === SRC_DOCKERFILE) return Buffer.from(BUNDLED_CONTENT)
+          throw new Error(`unexpected readFileSync: ${String(p)}`)
+        })
+        // Removed (e.g. by a concurrent sync) right before it is read.
+        markerFile.readRegularFileNoFollow.mockImplementationOnce(() => undefined)
+
+        syncDockerfileToConfigDir()
+
+        expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileCustomized'))
+        expect(mockedFs.copyFileSync).toHaveBeenCalledWith(SRC_DOCKERFILE, DEST_DOCKERFILE)
+        expect(mockedFs.writeFileSync).toHaveBeenCalledWith(HASH_FILE, BUNDLED_HASH, 'utf-8')
+        expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('docker.dockerfileSynced'))
       })
     })
 

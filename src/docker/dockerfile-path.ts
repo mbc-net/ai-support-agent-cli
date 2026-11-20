@@ -2,6 +2,7 @@ import { join, dirname } from 'path'
 import { existsSync } from 'fs'
 
 import { getConfigDir } from '../config-manager'
+import { pathExistsNoFollow } from '../utils/marker-file'
 
 /**
  * Get the path to the Dockerfile included in the npm package.
@@ -49,6 +50,12 @@ export function getProjectImageTag(tenantCode: string, projectCode: string, vers
 export interface DockerfileResolution {
   dockerfilePath: string
   contextDir: string
+  /**
+   * True for ~/.ai-support-agent/Dockerfile. `docker build -f` follows a
+   * symlink, so buildImage() builds from a no-follow snapshot of it
+   * (design §7.7).
+   */
+  fromConfigDir: boolean
 }
 
 /**
@@ -60,11 +67,13 @@ export function resolveDockerfile(customPath?: string): DockerfileResolution {
     if (!existsSync(customPath)) {
       throw new Error(`Dockerfile not found: ${customPath}`)
     }
-    return { dockerfilePath: customPath, contextDir: dirname(customPath) }
+    return { dockerfilePath: customPath, contextDir: dirname(customPath), fromConfigDir: false }
   }
   const configDockerfile = getConfigDockerfilePath()
-  if (existsSync(configDockerfile)) {
-    return { dockerfilePath: configDockerfile, contextDir: dirname(configDockerfile) }
+  // lstat-based: a symlink (even a dangling one) counts as present, so it is
+  // refused by buildImage() instead of silently falling back to the bundle.
+  if (pathExistsNoFollow(configDockerfile)) {
+    return { dockerfilePath: configDockerfile, contextDir: dirname(configDockerfile), fromConfigDir: true }
   }
-  return { dockerfilePath: getDockerfilePath(), contextDir: getDockerContextDir() }
+  return { dockerfilePath: getDockerfilePath(), contextDir: getDockerContextDir(), fromConfigDir: false }
 }

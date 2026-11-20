@@ -2714,6 +2714,7 @@ describe('chat-executor', () => {
 
       let capturedPath: string | undefined
       let capturedConversationId: string | undefined
+      let capturedBrowserToken: string | undefined
       const mockProcess = createMockChildProcess()
       spawn.mockImplementation((_cmd: string, args: string[]) => {
         const idx = args.indexOf('--mcp-config')
@@ -2721,6 +2722,7 @@ describe('chat-executor', () => {
         if (capturedPath) {
           const content = JSON.parse(readFileSync(capturedPath, 'utf-8'))
           capturedConversationId = content.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID
+          capturedBrowserToken = content.mcpServers['ai-support-agent'].env.AI_SUPPORT_BROWSER_LOCAL_TOKEN
         }
         return mockProcess
       })
@@ -2732,6 +2734,8 @@ describe('chat-executor', () => {
         activeChatMode: 'claude_code',
         agentId: 'agent-1',
         mcpConfigPath: baseConfigPath,
+        browserLocalPort: 23456,
+        browserLocalToken: 'fixture-current-token',
       })
 
       await new Promise((r) => setTimeout(r, 10))
@@ -2744,6 +2748,7 @@ describe('chat-executor', () => {
       expect(capturedPath).toBeDefined()
       expect(capturedPath).not.toBe(baseConfigPath)
       expect(capturedConversationId).toBe('conv-999')
+      expect(capturedBrowserToken).toBe('fixture-current-token')
       // The base (shared, per-project) config must remain untouched.
       const baseContent = JSON.parse(readFileSync(baseConfigPath, 'utf-8'))
       expect(baseContent.mcpServers['ai-support-agent'].env.AI_SUPPORT_CONVERSATION_ID).toBeUndefined()

@@ -40,8 +40,19 @@ import { removePidFile } from '../pid-manager'
 import { projectKey as toProjectKey } from '../project-key'
 import { ApiClient } from '../api-client'
 import type { ProjectRegistration } from '../types'
-import { atomicWriteFile, getErrorMessage } from '../utils'
-import { readMarkerFile } from '../utils/marker-file'
+import { getErrorMessage } from '../utils'
+import {
+  DOCKER_ASSET_MAX_BYTES,
+  MARKER_FILE_MAX_BYTES,
+  UnsafeFileError,
+  copyRegularFileNoFollow,
+  isRegularFileNoFollow,
+  pathExistsNoFollow,
+  readMarkerFile,
+  ensureRealDirectoryChain,
+  snapshotDockerfile,
+  writeFileNoFollow,
+} from '../utils/marker-file'
 import { DockerLogBuffer } from './docker-log-buffer'
 import { CONTAINER_START_ARGV, buildDockerUserArgs } from './docker-args'
 import type { DockerRunOptions } from './docker-runner'
@@ -49,7 +60,7 @@ import { IMAGE_NAME, buildContainerName, removeStaleContainer, makeSessionId, re
 import { buildProjectVolumeMounts } from './volume-mount-builder'
 import { buildDevMounts } from './docker-utils'
 import { buildProjectImage } from './project-image-builder'
-import { getProjectConfigHostDir } from '../utils/path-utils'
+import { getBuildSnapshotsDir, getProjectConfigHostDir, prepareSnapshotsDir } from '../utils/path-utils'
 import { migrateProjectConfigDir } from './project-config'
 import { installUpdateAndRestart } from './update-handler'
 
@@ -84,6 +95,8 @@ interface DockerContainerHandle {
 export class DockerSupervisor {
   private handles = new Map<string, DockerContainerHandle>()
   private updating = false
+  /** rebuildAndRestart calls still running (see exitIfNothingRunning). */
+  private pendingRebuilds = 0
   private opts: DockerRunOptions
   private version: string
   private onAllStopped: (() => void) | undefined
@@ -165,6 +178,112 @@ export class DockerSupervisor {
     if (!registeredId || registeredId === previousId) return null
     this.setProjectAgentId(project, registeredId)
     return { previousId, newId: registeredId }
+  }
+
+  /** Log a failed (or refused) build and write its reason to the build-error file. */
+  private recordBuildFailure(project: ProjectRegistration, projectConfigHostDir: string, errorMsg: string): void {
+    logger.error(`[docker] Image build failed: ${errorMsg}`)
+    logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
+    const buildErrorPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILD_ERROR)
+    const truncatedError = errorMsg.length > DOCKER_BUILD_ERROR_MAX_BYTES ? errorMsg.substring(0, DOCKER_BUILD_ERROR_MAX_BYTES) + '...(truncated)' : errorMsg
+    /* istanbul ignore next */
+    try {
+      // The project config dir is container-writable: never write through a
+      // symlink or a planted temp file there (design §7.7).
+      writeFileNoFollow(buildErrorPath, truncatedError)
+    } catch (writeErr) {
+      logger.warn(`[docker] Failed to write build error file: ${getErrorMessage(writeErr)}`)
+    }
+  }
+
+  /**
+   * Record the customization hash as built (docker-customization-hash →
+   * docker-built-hash) without following a symlink at either path. A refused
+   * source is logged and leaves docker-built-hash as it was.
+   */
+  private copyHashMarker(project: ProjectRegistration, srcHash: string, dstHash: string): void {
+    try {
+      copyRegularFileNoFollow(srcHash, dstHash, MARKER_FILE_MAX_BYTES)
+    } catch (err: unknown) {
+      logger.warn(`[docker] Failed to record the built hash for ${this.projectKey(project)}: ${getErrorMessage(err)}`)
+    }
+  }
+
+  /**
+   * Remove a rebuild-request marker that is not a regular file (a symlink,
+   * directory, FIFO, ...). It is never followed or read; `unlink` removes a
+   * symlink itself, never its target. Logged so the ignored request is visible.
+   */
+  private discardIrregularRebuildMarker(project: ProjectRegistration, rebuildMarker: string): void {
+    logger.warn(`[docker] Ignoring the rebuild request of ${this.projectKey(project)}: ${rebuildMarker} is not a regular file`)
+    try {
+      try {
+        fs.unlinkSync(rebuildMarker)
+      } catch (err: unknown) {
+        // A directory: an empty one goes with rmdir; a non-empty one stays
+        // (and is logged): walking a tree the container controls is not
+        // worth it.
+        // (Linux reports EISDIR; macOS reports EPERM, which Linux also uses
+        // for other reasons, so only a directory is retried with rmdir.)
+        const code = (err as NodeJS.ErrnoException)?.code
+        if (code !== 'EISDIR' && code !== 'EPERM') throw err
+        if (!fs.lstatSync(rebuildMarker).isDirectory()) throw err
+        fs.rmdirSync(rebuildMarker)
+      }
+    } catch (err: unknown) {
+      logger.warn(`[docker] Failed to remove ${rebuildMarker}: ${getErrorMessage(err)}`)
+    }
+  }
+
+  /**
+   * The project config dir must be a real directory before anything in it is
+   * read, written or bind-mounted. Without a projectDir the container gets its
+   * parent (projects/<t>/<p>) read-write, so it can swap this directory for a
+   * symlink to, e.g., the host config dir holding every project's token
+   * (design §7.7). The levels above it are the host user's own (a container
+   * cannot swap its own mount point), so a symlinked `projects/` stays
+   * allowed. Created (0700) when missing. When refused the project is not
+   * started (no fallback); the check runs after the project's own container
+   * has been removed.
+   */
+  private projectConfigDirIsReal(project: ProjectRegistration, projectConfigHostDir: string): boolean {
+    try {
+      // The host-owned parents first (a recursive mkdir is fine there).
+      fs.mkdirSync(path.dirname(projectConfigHostDir), { recursive: true, mode: 0o700 })
+      ensureRealDirectoryChain(path.dirname(projectConfigHostDir), projectConfigHostDir)
+      return true
+    } catch (err: unknown) {
+      logger.error(`[docker] Not starting ${this.projectKey(project)}: ${getErrorMessage(err)}`)
+      return false
+    }
+  }
+
+  /**
+   * Whether anything (a symlink included) is at the project Dockerfile path.
+   * An lstat error counts as present: the rebuild path then fails to read it
+   * and records why as a build failure, instead of silently starting the
+   * previous image.
+   */
+  private dockerfilePresent(projectConfigHostDir: string): boolean {
+    const dockerfile = path.join(projectConfigHostDir, 'Dockerfile')
+    try {
+      return pathExistsNoFollow(dockerfile)
+    } catch (err: unknown) {
+      logger.warn(`[docker] Cannot check ${dockerfile}: ${getErrorMessage(err)}`)
+      return true
+    }
+  }
+
+  /** Remove the build-error file after a successful requested rebuild. */
+  private clearBuildError(projectConfigHostDir: string): void {
+    const buildErrorPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILD_ERROR)
+    try {
+      // unlink removes a symlink itself, never its target.
+      fs.unlinkSync(buildErrorPath)
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return
+      logger.warn(`[docker] Failed to remove the stale build error file ${buildErrorPath}: ${getErrorMessage(err)}`)
+    }
   }
 
   private createProjectApiClient(project: ProjectRegistration): ApiClient {
@@ -271,26 +390,106 @@ export class DockerSupervisor {
   }
 
   private async rebuildAndRestart(project: ProjectRegistration, projectConfigHostDir: string, forceIfDockerfileExists = false): Promise<void> {
+    this.pendingRebuilds++
+    try {
+      // The project's own container has exited; make sure no stale one with
+      // the same name is left before anything in its config dir is read.
+      removeStaleContainer(buildContainerName(project.tenantCode, project.projectCode, this.opts.agentId))
+      if (!this.projectConfigDirIsReal(project, projectConfigHostDir)) return
+      try {
+        await this.rebuildIfRequested(project, projectConfigHostDir, forceIfDockerfileExists)
+      } catch (err: unknown) {
+        // e.g. lstat failing with EACCES on a config dir the container chmodded:
+        // not a reason to leave the project down. Start the previous image.
+        logger.error(`[docker] Rebuild check failed for ${this.projectKey(project)}: ${getErrorMessage(err)}`)
+      }
+      // A rebuild was just attempted (or nothing asked for one): start now,
+      // without the pre-startup hash check. If recording the built hash failed,
+      // the check would otherwise send this straight back here forever.
+      this.spawnProject(project, { skipPrestartHashCheck: true })
+    } finally {
+      this.pendingRebuilds--
+      this.exitIfNothingRunning()
+    }
+  }
+
+  /**
+   * After a restart that ended without a container (the project was refused),
+   * behave as when the last container exits normally: stop guacd and exit, so
+   * the service manager sees the agent stopped instead of an idle supervisor.
+   */
+  private exitIfNothingRunning(): void {
+    if (this.handles.size > 0 || this.pendingRebuilds > 0 || this.updating || this.stopping) return
+    logger.error('[docker] No project container is running; exiting.')
+    this.shutdownGuacd({ agentsStopped: true, removeTrustStores: true })
+    this.onAllStopped?.()
+    process.exit(1)
+  }
+
+  private async rebuildIfRequested(project: ProjectRegistration, projectConfigHostDir: string, forceIfDockerfileExists: boolean): Promise<void> {
     const rebuildMarker = path.join(projectConfigHostDir, DOCKER_MARKER_REBUILD_NEEDED)
     const projectDockerfile = path.join(projectConfigHostDir, 'Dockerfile')
-    const hasMarker = fs.existsSync(rebuildMarker)
-    const shouldBuild = hasMarker || (forceIfDockerfileExists && fs.existsSync(projectDockerfile))
+    // The project config dir is writable by the container, so none of the
+    // files below may be followed through a symlink (design §7.7). Reads and
+    // copies go through the no-follow helpers in utils/marker-file. A
+    // rebuild marker that is not a regular file is removed and ignored; a
+    // Dockerfile that is not a regular file is refused by the snapshot below
+    // and recorded as a failed build.
+    const hasMarker = isRegularFileNoFollow(rebuildMarker)
+    if (!hasMarker && pathExistsNoFollow(rebuildMarker)) {
+      this.discardIrregularRebuildMarker(project, rebuildMarker)
+    }
+    const shouldBuild = hasMarker || (forceIfDockerfileExists && this.dockerfilePresent(projectConfigHostDir))
     if (shouldBuild) {
-      if (hasMarker) fs.unlinkSync(rebuildMarker)
+      if (hasMarker) {
+        try {
+          fs.unlinkSync(rebuildMarker)
+        } catch (err: unknown) {
+          // Removed concurrently: the request is still honoured below.
+          if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+            logger.warn(`[docker] Failed to remove ${rebuildMarker}: ${getErrorMessage(err)}`)
+          }
+        }
+      }
 
       // Load the registered agentId before building so build logs are stored under
       // the correct agentId (the one shown in the Web UI), not the host agentId.
       const registeredAgentIdPath = path.join(projectConfigHostDir, DOCKER_MARKER_REGISTERED_AGENT_ID)
       this.applyRegisteredAgentId(project, registeredAgentIdPath)
 
-      if (fs.existsSync(projectDockerfile)) {
+      // `docker build -f` would follow a symlinked Dockerfile, and its output
+      // is uploaded as the build log, so build from a private copy instead.
+      const srcHash = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
+      const dstHash = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
+      let dockerfileSnapshot: ReturnType<typeof snapshotDockerfile>
+      try {
+        // The snapshot directory is the host's own: a problem there is a
+        // failure to prepare the build (retried), not a refused Dockerfile.
+        prepareSnapshotsDir()
+      } catch (err: unknown) {
+        this.recordBuildFailure(project, projectConfigHostDir, `Failed to prepare ${getBuildSnapshotsDir()} for the build: ${getErrorMessage(err)}`)
+        return
+      }
+      try {
+        dockerfileSnapshot = snapshotDockerfile(projectDockerfile, DOCKER_ASSET_MAX_BYTES, getBuildSnapshotsDir())
+      } catch (err: unknown) {
+        // Refused (symlink, FIFO, oversized, swapped after the check above):
+        // handled like a failed `docker build`, recording why and marking the
+        // hash as built. Not copyable (EACCES, ENOSPC, ...): recorded too, but
+        // the hash is left as it is so the next start retries the build (no
+        // loop: this start skips the pre-startup hash check).
+        if (err instanceof UnsafeFileError) {
+          this.recordBuildFailure(project, projectConfigHostDir, `Refusing to build from ${projectDockerfile}: ${err.message}`)
+          this.copyHashMarker(project, srcHash, dstHash)
+        } else {
+          this.recordBuildFailure(project, projectConfigHostDir, `Failed to prepare ${projectDockerfile} for the build: ${getErrorMessage(err)}`)
+        }
+        dockerfileSnapshot = undefined
+      }
+      if (dockerfileSnapshot) {
         try {
-          await buildProjectImage(project.tenantCode, project.projectCode, this.version, projectDockerfile, this.createProjectApiClient(project), this.getProjectAgentId(project))
-          const srcHash = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
-          const dstHash = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
-          if (fs.existsSync(srcHash)) {
-            fs.copyFileSync(srcHash, dstHash)
-          }
+          await buildProjectImage(project.tenantCode, project.projectCode, this.version, dockerfileSnapshot.path, this.createProjectApiClient(project), this.getProjectAgentId(project))
+          this.copyHashMarker(project, srcHash, dstHash)
           // Clear a recorded failure only when this build is the rebuild the
           // agent actually asked for (marker present). Without the marker the
           // build ran purely because a Dockerfile happens to exist
@@ -299,49 +498,42 @@ export class DockerSupervisor {
           // failed to generate a new Dockerfile comes back up. Deleting the
           // file here would erase the reason it recorded moments ago, before
           // the restarted container ever gets to report it to the API.
-          if (hasMarker) {
-            const buildErrorPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILD_ERROR)
-            if (fs.existsSync(buildErrorPath)) {
-              fs.unlinkSync(buildErrorPath)
-            }
-          }
+          if (hasMarker) this.clearBuildError(projectConfigHostDir)
         } catch (err: unknown) {
-          const errorMsg = getErrorMessage(err)
-          logger.error(`[docker] Image build failed: ${errorMsg}`)
-          logger.warn(`[docker] Container ${this.projectKey(project)} will start with previous image due to build failure.`)
-          const buildErrorPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILD_ERROR)
-          const truncatedError = errorMsg.length > DOCKER_BUILD_ERROR_MAX_BYTES ? errorMsg.substring(0, DOCKER_BUILD_ERROR_MAX_BYTES) + '...(truncated)' : errorMsg
-          /* istanbul ignore next */
-          try {
-            atomicWriteFile(buildErrorPath, truncatedError)
-          } catch (writeErr) {
-            logger.warn(`[docker] Failed to write build error file: ${getErrorMessage(writeErr)}`)
-          }
-          const srcHash = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
-          const dstHash = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
-          if (fs.existsSync(srcHash)) {
-            fs.copyFileSync(srcHash, dstHash)
-          }
+          this.recordBuildFailure(project, projectConfigHostDir, getErrorMessage(err))
+          this.copyHashMarker(project, srcHash, dstHash)
+        } finally {
+          dockerfileSnapshot.cleanup()
         }
       }
     }
-    this.spawnProject(project)
   }
 
-  private spawnProject(project: ProjectRegistration): void {
+  private spawnProject(project: ProjectRegistration, opts: { skipPrestartHashCheck?: boolean } = {}): void {
     const key = this.projectKey(project)
     const projectConfigHostDir = getProjectConfigHostDir(project.tenantCode, project.projectCode)
+    const containerName = buildContainerName(project.tenantCode, project.projectCode, this.opts.agentId)
+    // Before anything in the config dir is checked or read: a stale container
+    // of this project (e.g. after the supervisor was killed) could still write
+    // there and race the checks below.
+    removeStaleContainer(containerName)
+    if (!this.projectConfigDirIsReal(project, projectConfigHostDir)) return
 
     // Pre-startup hash check: if docker-customization-hash !== docker-built-hash,
     // rebuild before starting the container
     const customizationHashPath = path.join(projectConfigHostDir, DOCKER_MARKER_CUSTOMIZATION_HASH)
     const builtHashPath = path.join(projectConfigHostDir, DOCKER_MARKER_BUILT_HASH)
-    if (fs.existsSync(customizationHashPath) && fs.existsSync(builtHashPath)) {
-      const customizationHash = fs.readFileSync(customizationHashPath, 'utf-8').trim()
-      const builtHash = fs.readFileSync(builtHashPath, 'utf-8').trim()
-      if (customizationHash !== builtHash) {
+    const customizationHash = opts.skipPrestartHashCheck ? undefined : readMarkerFile(customizationHashPath)
+    const builtHash = opts.skipPrestartHashCheck ? undefined : readMarkerFile(builtHashPath)
+    if (customizationHash !== undefined && builtHash !== undefined) {
+      // With no Dockerfile at all there is nothing to rebuild from. A
+      // Dockerfile that exists but is not a regular file goes to
+      // rebuildAndRestart, which refuses it and records why.
+      if (customizationHash !== builtHash && this.dockerfilePresent(projectConfigHostDir)) {
         logger.info(`[docker] Pre-startup hash mismatch for ${key}, rebuilding before start...`)
-        void this.rebuildAndRestart(project, projectConfigHostDir, true)
+        void this.rebuildAndRestart(project, projectConfigHostDir, true).catch((err) => {
+          logger.error(`[docker] Restart failed: ${getErrorMessage(err)}`)
+        })
         return
       }
     }
@@ -373,8 +565,6 @@ export class DockerSupervisor {
     }
 
     const imageTag = this.getImageTag(project)
-    const containerName = buildContainerName(project.tenantCode, project.projectCode, this.opts.agentId)
-    removeStaleContainer(containerName)
     const cidFile = path.join(os.tmpdir(), `ai-support-agent-${project.tenantCode}-${project.projectCode}-${Date.now()}.cid`)
     // このプロジェクトの guacd を専用ネットワークに用意し、このコンテナを同じ
     // ネットワークへ参加させる。**こちらが通常の起動経路**（プロジェクトが 1 件でも
