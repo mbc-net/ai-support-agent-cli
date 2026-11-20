@@ -3513,7 +3513,7 @@ describe('approved Zabbix configuration termination proof', () => {
   })
   // The previous revision (installed Agent 6.0 / 7.0 only) stays approved so a recipe stored
   // before the 8.0 update keeps certifying while CLI, API and stored recipe roll out separately.
-  it.each(['zabbix-agent-recipe.yaml','zabbix-agent-recipe-agent7.yaml','zabbix-agent-recipe-agent8.yaml'])('certifies the real reviewed combined recipe %s only after process closure', async file => {
+  it.each(['zabbix-agent-recipe.yaml','zabbix-agent-recipe-agent7.yaml','zabbix-agent-recipe-agent8.yaml','zabbix-agent-recipe-rundeck-buffer.yaml'])('certifies the real reviewed combined recipe %s only after process closure', async file => {
     const fixture = load(actualFs.readFileSync(path.join(__dirname,'fixtures',file),'utf8')) as {body:string}
     const body = dump(load(fixture.body))
     const pending = executeServerSetupAnsible({executionId:'exec1',body,mode:'resident',targetOs:'linux',credential:CREDENTIAL,

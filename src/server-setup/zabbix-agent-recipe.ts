@@ -10,8 +10,10 @@ export const ZABBIX_AGENT_RECIPE_BODY_SHA256S: readonly string[] = [
   '3eb42f67267dd6658588a9a45bac523e365e9f10106715757defbc8c1afa0c12',
   // Also accepts installed Agent 8.0 (previous fixture, retained for rollout).
   '5449ec3fc2c11ac7b33df0f52d35bddd5a5033cd9551b2fb2d2cf394ffbf303c',
-  // Also admits the exact root-owned Rundeck persistent-buffer Include.
+  // Also admits the exact root-owned Rundeck persistent-buffer Include (previous fixture).
   'fb688303666d3fd9dd075309a60edee2871d6cd1788364b19feace37143fcc76',
+  // Also admits packaged Agent 2 plugin paths under /usr/libexec/zabbix (Ubuntu 24.04).
+  'b84d10d6ae050b48ff4f5d9167dad20e5481335842fde65d4e6e6beadc3b5849',
 ]
 
 /** Dedicated consumer names; extra-vars must not override role internals/registers. */
