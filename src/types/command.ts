@@ -199,6 +199,8 @@ export interface ReadonlyDiagnosticPayload {
   expectedCommand?: unknown
   /** Paths `log_tail` may read, resolved by the api from project settings. */
   allowedLogPaths?: unknown
+  /** Extra log root directories (besides /var/log/), resolved by the api from project settings. */
+  allowedLogRoots?: unknown
   timeoutSeconds?: unknown
   maxOutputBytes?: unknown
 }

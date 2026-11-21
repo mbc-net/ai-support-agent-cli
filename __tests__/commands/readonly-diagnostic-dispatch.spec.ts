@@ -134,6 +134,23 @@ describe('readonly_diagnostic dispatch', () => {
       ['missing allowedLogPaths', { allowedLogPaths: undefined }],
       ['non-array allowedLogPaths', { allowedLogPaths: '/var/log/syslog' }],
       ['non-string entry in allowedLogPaths', { allowedLogPaths: ['/var/log/syslog', 1] }],
+      ['non-array allowedLogRoots', { allowedLogRoots: '/opt/myapp/' }],
+      ['non-string entry in allowedLogRoots', { allowedLogRoots: ['/opt/myapp/', 1] }],
+      ['invalid root in allowedLogRoots', { allowedLogRoots: ['/opt/myapp/', '/etc/'] }],
+      ['more than 10 allowedLogRoots', {
+        allowedLogRoots: Array.from({ length: 11 }, (_, i) => `/opt/app${i}/`),
+      }],
+      ['custom-root file without allowedLogRoots', {
+        params: { path: '/opt/myapp/logs/app.log', lines: 50 },
+        expectedCommand: 'tail -n 50 -- /opt/myapp/logs/app.log',
+        allowedLogPaths: ['/opt/myapp/logs/app.log'],
+      }],
+      ['custom-root file under a different root', {
+        params: { path: '/opt/myapp/logs/app.log', lines: 50 },
+        expectedCommand: 'tail -n 50 -- /opt/myapp/logs/app.log',
+        allowedLogPaths: ['/opt/myapp/logs/app.log'],
+        allowedLogRoots: ['/opt/other/'],
+      }],
     ])('%s', async (_label, overrides) => {
       const result = await run(payload(overrides))
       expect(result).toEqual({ success: false, error: 'readonly_diagnostic rejected: invalid catalog request' })
@@ -306,6 +323,50 @@ describe('readonly_diagnostic dispatch', () => {
         error: 'readonly_diagnostic rejected: log path is not a regular file',
       })
       expect(mockExecuteSshCommand).toHaveBeenCalledTimes(2)
+    })
+
+    describe('custom log roots', () => {
+      const APP_LOG = '/opt/myapp/logs/app.log'
+      const rootPayload = (overrides: Partial<ReadonlyDiagnosticPayload> = {}) =>
+        payload({
+          params: { path: APP_LOG, lines: 50 },
+          expectedCommand: `tail -n 50 -- ${APP_LOG}`,
+          allowedLogPaths: [APP_LOG],
+          allowedLogRoots: ['/opt/myapp/'],
+          ...overrides,
+        })
+
+      it('reads a file under a configured root after the preflight checks', async () => {
+        const result = await run(rootPayload())
+        expect(mockExecuteSshCommand.mock.calls).toEqual([
+          [CREDENTIAL, `readlink -e -- ${APP_LOG}`, 25],
+          [CREDENTIAL, `test -f ${APP_LOG}`, 25],
+          [CREDENTIAL, `tail -n 50 -- ${APP_LOG}`, 25],
+        ])
+        expect(result).toEqual({
+          success: true,
+          data: { command: `tail -n 50 -- ${APP_LOG}`, output: 'log line\n', truncated: false },
+        })
+      })
+
+      it('accepts exactly 10 roots', async () => {
+        const roots = [...Array.from({ length: 9 }, (_, i) => `/opt/app${i}/`), '/opt/myapp/']
+        const result = await run(rootPayload({ allowedLogRoots: roots }))
+        expect(result.success).toBe(true)
+      })
+
+      it.each<[string, string]>([
+        ['a symlink leaving the root', '/etc/shadow\n'],
+        ['a symlink to another file under the root', '/opt/myapp/logs/other.log\n'],
+      ])('rejects %s without tailing', async (_label, resolved) => {
+        routeSsh(resolved, '')
+        const result = await run(rootPayload())
+        expect(result).toEqual({
+          success: false,
+          error: 'readonly_diagnostic rejected: log path is not a plain file under the allowlist (symlink or missing)',
+        })
+        expect(mockExecuteSshCommand).toHaveBeenCalledTimes(1)
+      })
     })
 
     it('reuses the single-use credential for every SSH call', async () => {

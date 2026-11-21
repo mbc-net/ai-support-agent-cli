@@ -361,16 +361,28 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       buildReadonlyDiagnostic,
       firstLines,
       READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES,
+      READONLY_LOG_ROOTS_MAX,
       readonlyDiagnosticCommandText,
       TOP_PROCESSES_OUTPUT_LINES,
       truncateUtf8,
       validateReadonlyLogPath,
+      validateReadonlyLogRoot,
     } = await import('./readonly-diagnostic-catalog')
 
     const allowedLogPaths = payload.allowedLogPaths
+    // Unset roots = no extra roots (older api). Any malformed root rejects the
+    // whole request instead of being silently dropped.
+    const allowedLogRoots = payload.allowedLogRoots ?? []
+    const rootsValid =
+      Array.isArray(allowedLogRoots) &&
+      allowedLogRoots.length <= READONLY_LOG_ROOTS_MAX &&
+      allowedLogRoots.every((root) => validateReadonlyLogRoot(root) !== null)
     const built =
-      Array.isArray(allowedLogPaths) && allowedLogPaths.every((path) => typeof path === 'string')
-        ? buildReadonlyDiagnostic(payload.catalogId, payload.params, { allowedLogPaths })
+      rootsValid && Array.isArray(allowedLogPaths) && allowedLogPaths.every((path) => typeof path === 'string')
+        ? buildReadonlyDiagnostic(payload.catalogId, payload.params, {
+            allowedLogPaths,
+            allowedLogRoots: allowedLogRoots as string[],
+          })
         : null
     if (!built) {
       return errorResult('readonly_diagnostic rejected: invalid catalog request')
@@ -395,7 +407,8 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
 
     // log_tail: prepare the symlink / regular-file checks up front so a bad
     // path is rejected before the single-use credential is consumed.
-    const preflight = built.id === 'log_tail' ? buildLogTailPreflight(String(built.params.path)) : undefined
+    const logRoots = allowedLogRoots as string[]
+    const preflight = built.id === 'log_tail' ? buildLogTailPreflight(String(built.params.path), logRoots) : undefined
     if (preflight === null) {
       return errorResult('readonly_diagnostic rejected: invalid catalog request')
     }
@@ -432,7 +445,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
         // executeSshCommand returns plain stdout only on exit 0, so an exact
         // match also proves readlink succeeded. Equality with the requested
         // path means no component is a symlink; re-check the allowlist anyway.
-        if (resolved !== `${path}\n` || validateReadonlyLogPath(resolved.slice(0, -1)) === null) {
+        if (resolved !== `${path}\n` || validateReadonlyLogPath(resolved.slice(0, -1), logRoots) === null) {
           return errorResult('readonly_diagnostic rejected: log path is not a plain file under the allowlist (symlink or missing)')
         }
         const regular = await runRemote(preflight.regularFile)

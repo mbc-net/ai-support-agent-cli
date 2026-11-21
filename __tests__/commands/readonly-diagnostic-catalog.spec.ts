@@ -22,6 +22,7 @@ import {
   TOP_PROCESSES_OUTPUT_LINES,
   truncateUtf8,
   validateReadonlyLogPath,
+  validateReadonlyLogRoot,
 } from '../../src/commands/readonly-diagnostic-catalog'
 import { validateCommand } from '../../src/security'
 
@@ -238,6 +239,43 @@ describe('readonly-diagnostic-catalog', () => {
     })
   })
 
+  describe('log_tail and allowedLogRoots', () => {
+    const appLog = '/opt/myapp/logs/app.log'
+
+    it('accepts a file under a configured root when it is also in allowedLogPaths', () => {
+      expect(
+        buildReadonlyDiagnostic(
+          'log_tail',
+          { path: appLog },
+          { allowedLogPaths: [appLog], allowedLogRoots: ['/opt/myapp/'] },
+        ),
+      ).toEqual({ id: 'log_tail', params: { path: appLog, lines: 100 }, argv: ['tail', '-n', '100', '--', appLog] })
+    })
+
+    it('rejects the same file without the root (unset or empty)', () => {
+      expect(buildReadonlyDiagnostic('log_tail', { path: appLog }, { allowedLogPaths: [appLog] })).toBeNull()
+      expect(
+        buildReadonlyDiagnostic('log_tail', { path: appLog }, { allowedLogPaths: [appLog], allowedLogRoots: [] }),
+      ).toBeNull()
+    })
+
+    it('rejects a file under a root that is not in allowedLogPaths', () => {
+      expect(
+        buildReadonlyDiagnostic('log_tail', { path: appLog }, { allowedLogPaths: [], allowedLogRoots: ['/opt/myapp/'] }),
+      ).toBeNull()
+    })
+
+    it('ignores invalid roots even if they slipped into allowedLogRoots', () => {
+      expect(
+        buildReadonlyDiagnostic(
+          'log_tail',
+          { path: '/etc/shadow' },
+          { allowedLogPaths: ['/etc/shadow'], allowedLogRoots: ['/etc/'] },
+        ),
+      ).toBeNull()
+    })
+  })
+
   describe('passes the agent command blocklist (validateCommand)', () => {
     it.each(VALID_CASES)('$id', ({ id, params }) => {
       const built = buildReadonlyDiagnostic(id, params, ALLOWED)
@@ -288,7 +326,7 @@ describe('validateReadonlyLogPath', () => {
       ['prefix lookalike directory', '/var/logs/app.log'],
       ['prefix lookalike directory 2', '/var/log2/app.log'],
       ['directly under /var', '/var/app.log'],
-      ['under /opt', '/opt/app-1/logs/app.log'],
+      ['under /opt (no roots configured)', '/opt/app-1/logs/app.log'],
       ['under /devops', '/devops/app.log'],
       ['SSH host key', '/etc/ssh/ssh_host_ed25519_key'],
       ['AWS credentials', '/home/u/.aws/credentials'],
@@ -395,7 +433,131 @@ describe('validateReadonlyLogPath', () => {
   })
 })
 
+describe('validateReadonlyLogRoot', () => {
+  // Mirrors the shared custom-log-roots rule table (API / CLI / web).
+  describe('accepts', () => {
+    it.each(['/opt/myapp/', '/srv/web/logs/', '/home/app/logs/', '/opt/app-1/logs/', '/opt/app-1/var_log.d/'])('%s', (root) => {
+      expect(validateReadonlyLogRoot(root)).toBe(root)
+    })
+
+    it('accepts a 200-char root', () => {
+      const root = `/opt/${'a'.repeat(200 - '/opt/'.length - 1)}/`
+      expect(root).toHaveLength(200)
+      expect(validateReadonlyLogRoot(root)).toBe(root)
+    })
+  })
+
+  describe('rejects', () => {
+    it.each<[string, unknown]>([
+      ['/', '/'],
+      ['single segment /opt/', '/opt/'],
+      ['denied /etc/ subdirectory', '/etc/myapp/'],
+      ['denied /var/lib/', '/var/lib/x/'],
+      ['denied /tmp/', '/tmp/x/'],
+      ['redundant /var/log/', '/var/log/'],
+      ['secret segment .ssh', '/opt/app/.ssh/'],
+      ['..', '/opt/../etc/'],
+      ['no trailing slash', '/opt/myapp'],
+      ['denied /root/', '/root/app/'],
+      ['denied /proc/', '/proc/self/'],
+      ['denied /sys/', '/sys/kernel/'],
+      ['denied /dev/', '/dev/shm/'],
+      ['denied /run/', '/run/secrets/'],
+      ['denied /boot/', '/boot/grub/'],
+      ['denied /usr/', '/usr/local/'],
+      ['denied /bin/', '/bin/x/'],
+      ['denied /sbin/', '/sbin/x/'],
+      ['denied /lib/', '/lib/x/'],
+      ['denied /lib32/', '/lib32/x/'],
+      ['denied /lib64/', '/lib64/x/'],
+      ['denied /libx32/', '/libx32/x/'],
+      ['denied /var/run/', '/var/run/app/'],
+      ['denied /var/spool/', '/var/spool/cron/'],
+      ['denied /var/tmp/', '/var/tmp/app/'],
+      ['denied /snap/', '/snap/app/'],
+      ['denied /srv/secrets/', '/srv/secrets/app/'],
+      ['denied prefix itself (/var/lib/)', '/var/lib/'],
+      ['denied prefix itself (/srv/secrets/)', '/srv/secrets/'],
+      ['denied deep below', '/etc/myapp/logs/'],
+      ['secret segment .env', '/opt/.env/'],
+      ['secret segment credentials', '/opt/credentials/'],
+      ['secret segment *history (case)', '/opt/App_HISTORY/'],
+      // Rows ported from the api's readonly-log-path.util.spec.ts table
+      ['secret segment .aws', '/home/app/.aws/'],
+      ['secret segment .env*', '/opt/app/.env.d/'],
+      ['secret segment *_key', '/opt/app/server_key/'],
+      ['secret segment history', '/opt/app/history/'],
+      ['secret segment Credentials (case)', '/opt/Credentials/'],
+      ['.. inside a name', '/opt/app..x/'],
+      ['semicolon', '/opt/app;id/'],
+      ['non-ASCII', '/opt/アプリ/'],
+      ['. segment', '/opt/./myapp/'],
+      ['//', '/opt//myapp/'],
+      ['relative', 'opt/myapp/'],
+      ['empty', ''],
+      ['whitespace', '/opt/my app/'],
+      ['wildcard', '/opt/*/'],
+      ['201 chars', `/opt/${'a'.repeat(200 - '/opt/'.length)}/`],
+      ['non-string', 1],
+      ['undefined', undefined],
+      ['array', ['/opt/myapp/']],
+    ])('%s', (_label, root) => {
+      expect(validateReadonlyLogRoot(root)).toBeNull()
+    })
+  })
+
+  it('does not over-reject roots that only resemble denied prefixes', () => {
+    for (const root of ['/etcetera/app/', '/var/library/app/', '/opt/etc/', '/tmpfs/app/', '/usrdata/app/', '/srv/secretsx/']) {
+      expect(validateReadonlyLogRoot(root)).toBe(root)
+    }
+  })
+})
+
+describe('validateReadonlyLogPath with roots', () => {
+  const ROOTS = ['/opt/myapp/'] as const
+
+  it('accepts a file under a configured root', () => {
+    expect(validateReadonlyLogPath('/opt/myapp/logs/app.log', ROOTS)).toBe('/opt/myapp/logs/app.log')
+    expect(validateReadonlyLogPath('/opt/myapp/app.log', ROOTS)).toBe('/opt/myapp/app.log')
+  })
+
+  it('rejects the same file without roots', () => {
+    expect(validateReadonlyLogPath('/opt/myapp/logs/app.log')).toBeNull()
+    expect(validateReadonlyLogPath('/opt/myapp/logs/app.log', [])).toBeNull()
+  })
+
+  it('still accepts /var/log files when roots are given', () => {
+    expect(validateReadonlyLogPath('/var/log/syslog', ROOTS)).toBe('/var/log/syslog')
+  })
+
+  it.each<[string, string]>([
+    ['secret file under a root', '/opt/myapp/.env'],
+    ['the root directory itself', '/opt/myapp/'],
+    ['the root without trailing slash', '/opt/myapp'],
+    ['prefix lookalike', '/opt/myapp2/app.log'],
+    ['.. escaping the root', '/opt/myapp/../../etc/shadow'],
+    ['secret directory under a root', '/opt/myapp/.ssh/authorized_keys'],
+    ['trailing / under a root', '/opt/myapp/logs/'],
+  ])('rejects %s', (_label, path) => {
+    expect(validateReadonlyLogPath(path, ROOTS)).toBeNull()
+  })
+
+  it('ignores roots that fail validateReadonlyLogRoot', () => {
+    expect(validateReadonlyLogPath('/etc/shadow', ['/etc/'])).toBeNull()
+    expect(validateReadonlyLogPath('/opt/app.log', ['/opt/'])).toBeNull()
+    expect(validateReadonlyLogPath('/opt/myapp/app.log', ['/opt/myapp'])).toBeNull()
+  })
+})
+
 describe('buildLogTailPreflight', () => {
+  it('accepts a file under a configured root only with that root', () => {
+    expect(buildLogTailPreflight('/opt/myapp/logs/app.log', ['/opt/myapp/'])).toEqual({
+      resolve: ['readlink', '-e', '--', '/opt/myapp/logs/app.log'],
+      regularFile: ['test', '-f', '/opt/myapp/logs/app.log'],
+    })
+    expect(buildLogTailPreflight('/opt/myapp/logs/app.log')).toBeNull()
+  })
+
   it('builds SAFE_ARG-only argv for the symlink and regular-file checks', () => {
     expect(buildLogTailPreflight('/var/log/nginx/error.log')).toEqual({
       resolve: ['readlink', '-e', '--', '/var/log/nginx/error.log'],
