@@ -712,6 +712,48 @@ describe('ApiClient', () => {
     })
   })
 
+  describe('getReadonlyDiagnosticCredential', () => {
+    it('should fetch the readonly_diagnostic JIT credential scoped to a commandId', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          hostId: 'asset-1',
+          hostname: 'db1.internal',
+          port: 22,
+          username: 'readonly',
+          authType: 'private_key',
+          privateKey: 'key-material',
+        },
+      })
+
+      const result = await client.getReadonlyDiagnosticCredential('cmd-1', 'agent-1')
+      expect(result.hostname).toBe('db1.internal')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/readonly-diagnostic-credential',
+        { params: { agentId: 'agent-1' }, headers: {} },
+      )
+    })
+
+    it('should not log the returned credential', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: { hostname: 'h', username: 'u', authType: 'private_key', privateKey: 'SECRET-KEY-MATERIAL' },
+      })
+      await client.getReadonlyDiagnosticCredential('cmd-1', 'agent-1')
+      const logged = JSON.stringify([
+        mockedLogger.debug.mock.calls,
+        mockedLogger.info.mock.calls,
+        mockedLogger.warn.mock.calls,
+        mockedLogger.error.mock.calls,
+      ])
+      expect(logged).not.toContain('SECRET-KEY-MATERIAL')
+    })
+
+    it('should reject an invalid commandId', async () => {
+      await expect(client.getReadonlyDiagnosticCredential('bad id!', 'agent-1')).rejects.toThrow(
+        'Invalid command ID format',
+      )
+    })
+  })
+
   describe('getServerSetupVariables', () => {
     it('should fetch server setup project variables scoped to a commandId', async () => {
       mockInstance.get.mockResolvedValue({
