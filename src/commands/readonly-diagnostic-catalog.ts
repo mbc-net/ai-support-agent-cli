@@ -113,6 +113,11 @@ const DENIED_LOG_ROOT_PREFIXES = [
   '/var/tmp/',
   '/snap/',
   '/srv/secrets/',
+  '/var/backups/',
+  '/var/mail/',
+  '/var/cache/',
+  '/mnt/',
+  '/media/',
 ] as const
 
 /** Path segments (directory or file names) that are never read, compared case-insensitively. */
@@ -123,9 +128,20 @@ const SENSITIVE_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   '.docker',
   '.gnupg',
   '.ssh',
+  '.netrc',
+  '.npmrc',
+  '.pgpass',
+  '.git-credentials',
+  '.my.cnf',
+  'authorized_keys',
+  'known_hosts',
+  '.htpasswd',
+  '.vault-token',
+  '.boto',
+  '.s3cfg',
 ])
-const SENSITIVE_SEGMENT_PREFIXES = ['.env', 'id_', 'credentials.'] as const
-const SENSITIVE_SEGMENT_SUFFIXES = ['_key', '.key', '.pem', '.p12', '.pfx', '.env', 'history'] as const
+const SENSITIVE_SEGMENT_PREFIXES = ['.env', 'id_', 'credentials.', 'shadow', 'gshadow', 'passwd'] as const
+const SENSITIVE_SEGMENT_SUFFIXES = ['_key', '.key', '.pem', '.p12', '.pfx', '.env', 'history', '.kdbx'] as const
 
 function isSensitiveSegment(segment: string): boolean {
   const lower = segment.toLowerCase()
@@ -180,8 +196,10 @@ export function validateReadonlyLogRoot(root: unknown): string | null {
  * trailing `/`); roots that fail validateReadonlyLogRoot are ignored; rejects
  * `..`, `//` and `.` segments; rejects any segment named `.env*`, `id_*`,
  * `*_key`, `*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.env`, `credentials`,
- * `credentials.*`, `*history`, `.aws`, `.kube`, `.docker`, `.gnupg` or `.ssh`
- * (case-insensitive).
+ * `credentials.*`, `*history`, `.aws`, `.kube`, `.docker`, `.gnupg`, `.ssh`,
+ * `.netrc`, `.npmrc`, `.pgpass`, `.git-credentials`, `.my.cnf`,
+ * `authorized_keys`, `known_hosts`, `.htpasswd`, `.vault-token`, `.boto`,
+ * `.s3cfg`, `shadow*`, `gshadow*`, `passwd*` or `*.kdbx` (case-insensitive).
  *
  * This only checks the string. Symlinks are checked on the target host right
  * before reading (see buildLogTailPreflight).

@@ -368,6 +368,30 @@ describe('validateReadonlyLogPath', () => {
       ['case mismatch (.ENV)', '/var/log/App/.ENV.local'],
       ['case mismatch (Credentials)', '/var/log/Credentials'],
       ['case mismatch (Credentials.JSON)', '/var/log/Credentials.JSON'],
+      // Log path rules v2
+      ['.netrc', '/var/log/app/.netrc'],
+      ['.npmrc', '/var/log/app/.npmrc'],
+      ['.pgpass', '/var/log/app/.pgpass'],
+      ['.git-credentials', '/var/log/app/.git-credentials'],
+      ['.my.cnf', '/var/log/app/.my.cnf'],
+      ['authorized_keys', '/var/log/app/authorized_keys'],
+      ['known_hosts', '/var/log/app/known_hosts'],
+      ['.htpasswd', '/var/log/app/.htpasswd'],
+      ['.vault-token', '/var/log/app/.vault-token'],
+      ['.boto', '/var/log/app/.boto'],
+      ['.s3cfg', '/var/log/app/.s3cfg'],
+      ['shadow', '/var/log/shadow'],
+      ['shadow-', '/var/log/shadow-'],
+      ['shadow.bak', '/var/log/shadow.bak'],
+      ['gshadow', '/var/log/gshadow'],
+      ['passwd', '/var/log/passwd'],
+      ['passwd-', '/var/log/passwd-'],
+      ['shadow* directory', '/var/log/shadow.d/app.log'],
+      ['*.kdbx', '/var/log/app/vault.kdbx'],
+      ['shadowsocks (shadow* prefix)', '/var/log/shadowsocks.log'],
+      ['case mismatch (.NETRC)', '/var/log/app/.NETRC'],
+      ['case mismatch (Passwd)', '/var/log/Passwd'],
+      ['case mismatch (.KDBX)', '/var/log/app/Vault.KDBX'],
     ])('%s', (_label, path) => {
       expect(validateReadonlyLogPath(path)).toBeNull()
     })
@@ -427,6 +451,9 @@ describe('validateReadonlyLogPath', () => {
       '/var/log/monkey_keys.log',
       '/var/log/credentials-service.log',
       '/var/log/mycredentials',
+      // Log path rules v2 must-stay-accepted rows
+      '/var/log/app/identity.log',
+      '/var/log/app/passwordless-login.log',
     ]) {
       expect(validateReadonlyLogPath(path)).toBe(path)
     }
@@ -501,13 +528,28 @@ describe('validateReadonlyLogRoot', () => {
       ['non-string', 1],
       ['undefined', undefined],
       ['array', ['/opt/myapp/']],
+      // Log path rules v2
+      ['denied /var/backups/', '/var/backups/app/'],
+      ['denied /var/mail/', '/var/mail/app/'],
+      ['denied /var/cache/', '/var/cache/app/'],
+      ['denied /mnt/', '/mnt/data/'],
+      ['denied /media/', '/media/usb/'],
+      ['denied prefix itself (/var/backups/)', '/var/backups/'],
+      ['denied prefix itself (/var/cache/)', '/var/cache/'],
+      ['secret segment .netrc', '/opt/app/.netrc/'],
+      ['secret segment known_hosts', '/opt/app/known_hosts/'],
+      ['secret segment shadow*', '/opt/shadow.d/'],
+      ['secret segment gshadow', '/opt/app/gshadow/'],
+      ['secret segment passwd*', '/opt/passwd-backup/'],
+      ['secret segment *.kdbx', '/opt/app/db.kdbx/'],
+      ['secret segment .S3CFG (case)', '/opt/app/.S3CFG/'],
     ])('%s', (_label, root) => {
       expect(validateReadonlyLogRoot(root)).toBeNull()
     })
   })
 
   it('does not over-reject roots that only resemble denied prefixes', () => {
-    for (const root of ['/etcetera/app/', '/var/library/app/', '/opt/etc/', '/tmpfs/app/', '/usrdata/app/', '/srv/secretsx/']) {
+    for (const root of ['/etcetera/app/', '/var/library/app/', '/opt/etc/', '/tmpfs/app/', '/usrdata/app/', '/srv/secretsx/', '/var/backupsx/app/', '/var/cached/app/', '/mnt2/app/', '/opt/media/', '/opt/passwordless/']) {
       expect(validateReadonlyLogRoot(root)).toBe(root)
     }
   })
