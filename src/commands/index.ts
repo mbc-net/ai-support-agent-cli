@@ -2,8 +2,9 @@ import type { ApiClient } from '../api-client'
 import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
-import { type AgentChatMode, type AgentCommandType, type CommandDispatch, type CommandResult, errorResult, type ServerSetupExecPayload, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
+import { type AgentChatMode, type AgentCommandType, type CommandDispatch, type CommandResult, errorResult, type ReadonlyDiagnosticPayload, type ServerSetupExecPayload, type SshExecCredential, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
 import type { RepoSyncResult } from '../repo-sync'
+import { validateCommand } from '../security'
 import { getErrorMessage } from '../utils'
 
 import { type AgentExecutionContext, forwardAgentExecutionContext } from './agent-execution-context'
@@ -52,6 +53,11 @@ export interface ExecuteCommandOptions extends AgentExecutionContext {
   /** E2E 専用のブラウザーセッションを実行後にクローズするコールバック。 */
   closeBrowserSession?: (sessionId: string) => Promise<void>
 }
+
+/** Bounds for the agent-side timeout of a readonly_diagnostic command (seconds). */
+const READONLY_DIAGNOSTIC_MIN_TIMEOUT_SECONDS = 5
+const READONLY_DIAGNOSTIC_MAX_TIMEOUT_SECONDS = 60
+const READONLY_DIAGNOSTIC_DEFAULT_TIMEOUT_SECONDS = 30
 
 /** Execution context passed to each handler */
 interface CommandContext {
@@ -336,6 +342,111 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       const credential = await fetchSshExecCredential(opts.client, opts.commandId, opts.agentId ?? '')
       const output = await executeSshCommand(credential, command, timeoutSeconds)
       return successResult(output)
+    } catch (error) {
+      return errorResult(getErrorMessage(error))
+    }
+  },
+
+  readonly_diagnostic: async ({ p, opts }) => {
+    // Alarm AI-check read-only diagnostic. Unlike ssh_exec, the command string
+    // is never taken from the payload: the argv is rebuilt from the local
+    // catalog and must match the api's expectedCommand. The JIT credential is
+    // single-use (409 on a second fetch) — never log it and never re-fetch.
+    if (!opts.commandId || !opts.client) {
+      return errorResult('readonly_diagnostic requires client context')
+    }
+    const payload = p as ReadonlyDiagnosticPayload
+    const {
+      buildLogTailPreflight,
+      buildReadonlyDiagnostic,
+      firstLines,
+      READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES,
+      readonlyDiagnosticCommandText,
+      TOP_PROCESSES_OUTPUT_LINES,
+      truncateUtf8,
+      validateReadonlyLogPath,
+    } = await import('./readonly-diagnostic-catalog')
+
+    const allowedLogPaths = payload.allowedLogPaths
+    const built =
+      Array.isArray(allowedLogPaths) && allowedLogPaths.every((path) => typeof path === 'string')
+        ? buildReadonlyDiagnostic(payload.catalogId, payload.params, { allowedLogPaths })
+        : null
+    if (!built) {
+      return errorResult('readonly_diagnostic rejected: invalid catalog request')
+    }
+    const command = readonlyDiagnosticCommandText(built.argv)
+    if (command !== payload.expectedCommand) {
+      return errorResult('readonly_diagnostic rejected: command mismatch')
+    }
+    const blocked = validateCommand(command)
+    if (blocked) {
+      return errorResult(`readonly_diagnostic rejected: ${blocked}`)
+    }
+
+    const rawTimeout = payload.timeoutSeconds
+    const timeoutSeconds = typeof rawTimeout === 'number' && Number.isFinite(rawTimeout)
+      ? Math.min(Math.max(rawTimeout, READONLY_DIAGNOSTIC_MIN_TIMEOUT_SECONDS), READONLY_DIAGNOSTIC_MAX_TIMEOUT_SECONDS)
+      : READONLY_DIAGNOSTIC_DEFAULT_TIMEOUT_SECONDS
+    const rawMaxBytes = payload.maxOutputBytes
+    const maxOutputBytes = typeof rawMaxBytes === 'number' && Number.isInteger(rawMaxBytes) && rawMaxBytes > 0
+      ? Math.min(rawMaxBytes, READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES)
+      : READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES
+
+    // log_tail: prepare the symlink / regular-file checks up front so a bad
+    // path is rejected before the single-use credential is consumed.
+    const preflight = built.id === 'log_tail' ? buildLogTailPreflight(String(built.params.path)) : undefined
+    if (preflight === null) {
+      return errorResult('readonly_diagnostic rejected: invalid catalog request')
+    }
+    if (preflight) {
+      for (const argv of [preflight.resolve, preflight.regularFile]) {
+        const preflightBlocked = validateCommand(readonlyDiagnosticCommandText(argv))
+        if (preflightBlocked) return errorResult(`readonly_diagnostic rejected: ${preflightBlocked}`)
+      }
+    }
+
+    // Never log the command output or the credential — only the catalog id.
+    logger.debug(`[readonly_diagnostic] catalogId=${built.id}`)
+    let credential: SshExecCredential
+    try {
+      credential = await opts.client.getReadonlyDiagnosticCredential(opts.commandId, opts.agentId ?? '')
+    } catch (error) {
+      return errorResult(`Failed to fetch read-only diagnostic credential: ${getErrorMessage(error)}`)
+    }
+    try {
+      const { executeSshCommand } = await import('./ssh-executor')
+      // All SSH calls share one timeout budget so the whole run stays within
+      // what the api waits for. The credential is fetched once and reused.
+      const deadline = Date.now() + timeoutSeconds * 1000
+      const runRemote = async (argv: readonly string[]): Promise<string | null> => {
+        const remainingSeconds = Math.ceil((deadline - Date.now()) / 1000)
+        if (remainingSeconds <= 0) return null
+        return executeSshCommand(credential, readonlyDiagnosticCommandText(argv), remainingSeconds)
+      }
+
+      if (preflight) {
+        const path = String(built.params.path)
+        const resolved = await runRemote(preflight.resolve)
+        if (resolved === null) return errorResult('readonly_diagnostic timed out')
+        // executeSshCommand returns plain stdout only on exit 0, so an exact
+        // match also proves readlink succeeded. Equality with the requested
+        // path means no component is a symlink; re-check the allowlist anyway.
+        if (resolved !== `${path}\n` || validateReadonlyLogPath(resolved.slice(0, -1)) === null) {
+          return errorResult('readonly_diagnostic rejected: log path is not a plain file under the allowlist (symlink or missing)')
+        }
+        const regular = await runRemote(preflight.regularFile)
+        if (regular === null) return errorResult('readonly_diagnostic timed out')
+        if (regular !== '') {
+          return errorResult('readonly_diagnostic rejected: log path is not a regular file')
+        }
+      }
+
+      const raw = await runRemote(built.argv)
+      if (raw === null) return errorResult('readonly_diagnostic timed out')
+      const shaped = built.id === 'top_processes' ? firstLines(raw, TOP_PROCESSES_OUTPUT_LINES) : raw
+      const { text: output, truncated } = truncateUtf8(shaped, maxOutputBytes)
+      return successResult({ command, output, truncated })
     } catch (error) {
       return errorResult(getErrorMessage(error))
     }

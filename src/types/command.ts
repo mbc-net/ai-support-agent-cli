@@ -30,6 +30,7 @@ export type AgentCommandType =
   | 'server_setup_exec'
   | 'server_setup_cancel'
   | 'ssh_exec'
+  | 'readonly_diagnostic'
   | 'tls_cert_check'
   | 'backup_inspect'
   | 'backup_export'
@@ -179,6 +180,29 @@ export interface SshExecPayload {
   timeoutSeconds?: unknown
 }
 
+/**
+ * Payload of the `readonly_diagnostic` command (alarm AI check). Issued by the
+ * api; the agent treats every field as untrusted. It rebuilds the argv from
+ * `catalogId` / `params` / `allowedLogPaths` with its own catalog
+ * (`commands/readonly-diagnostic-catalog.ts`) and only runs it when the result
+ * equals `expectedCommand` — the command string itself is never executed as
+ * given. `assetUid` / `connectionUid` / `connectionFingerprint` are used by the
+ * api to resolve the single-use JIT credential and are not read by the agent.
+ */
+export interface ReadonlyDiagnosticPayload {
+  assetUid?: unknown
+  connectionUid?: unknown
+  connectionFingerprint?: unknown
+  catalogId?: unknown
+  params?: unknown
+  /** The api's catalog argv joined with single spaces. */
+  expectedCommand?: unknown
+  /** Paths `log_tail` may read, resolved by the api from project settings. */
+  allowedLogPaths?: unknown
+  timeoutSeconds?: unknown
+  maxOutputBytes?: unknown
+}
+
 // Discriminated union for type-safe command dispatch
 export type CommandDispatch =
   | { type: 'execute_command'; payload: ShellCommandPayload }
@@ -206,6 +230,7 @@ export type CommandDispatch =
   | { type: 'server_setup_exec'; payload: ServerSetupExecPayload }
   | { type: 'server_setup_cancel'; payload: ServerSetupCancelPayload }
   | { type: 'ssh_exec'; payload: SshExecPayload }
+  | { type: 'readonly_diagnostic'; payload: ReadonlyDiagnosticPayload }
   | { type: 'tls_cert_check'; payload: TlsCertCheckPayload }
   | { type: 'backup_inspect'; payload: Record<string, unknown> }
   | { type: 'backup_export'; payload: Record<string, unknown> }

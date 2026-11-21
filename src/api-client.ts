@@ -692,6 +692,22 @@ export class ApiClient {
     )
   }
 
+  /**
+   * Single-use JIT SSH credential for a `readonly_diagnostic` command (alarm
+   * AI check). Same commandId-scoped design as `getSshExecCredential`: the
+   * target is resolved server-side from the command's payload. The api
+   * answers 409 to a second fetch, so callers must not re-fetch. Never log
+   * the returned credential; only log the commandId.
+   */
+  async getReadonlyDiagnosticCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
+    return this.getCommandScopedResource<SshExecCredential>(
+      commandId,
+      agentId,
+      API_ENDPOINTS.READONLY_DIAGNOSTIC_CREDENTIAL(this.tenantCode, commandId),
+      `Fetching read-only diagnostic credential for command: ${commandId}`,
+    )
+  }
+
   async getBrowserCredentials(name: string): Promise<BrowserCredentials> {
     logger.debug(`Fetching browser credentials for: ${name}`)
     return this.get<BrowserCredentials>(API_ENDPOINTS.BROWSER_CREDENTIALS(this.tenantCode), { params: { name } })

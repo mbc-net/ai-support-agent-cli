@@ -315,6 +315,11 @@ export const API_ENDPOINTS = {
   // client-supplied hostId.
   SSH_EXEC_CREDENTIAL: (tenantCode: string, commandId: string) =>
     `/api/${tenantCode}/agent/commands/${commandId}/ssh-exec-credential`,
+  // Single-use JIT SSH credential for a readonly_diagnostic command (alarm AI
+  // check). The api resolves the target from the command's payload, re-verifies
+  // it against its catalog, and returns 409 on a second fetch.
+  READONLY_DIAGNOSTIC_CREDENTIAL: (tenantCode: string, commandId: string) =>
+    `/api/${tenantCode}/agent/commands/${commandId}/readonly-diagnostic-credential`,
   BROWSER_CREDENTIALS: (tenantCode: string) => `/api/${tenantCode}/agent/browser-credentials`,
   E2E_ENV_VARIABLES: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/e2e-env-variables`,
   SERVER_SETUP_CONFIGURATION_COMPLETE: (tenantCode: string, commandId: string) => `/api/${tenantCode}/agent/commands/${commandId}/server-setup-configuration-complete`,
