@@ -42,6 +42,7 @@ import {
 } from './constants'
 import { calculateBackoff } from './retry-strategy'
 import { getConfigDir } from './config-manager'
+import { READONLY_DIAGNOSTIC_CAPABILITY } from './commands/readonly-diagnostic-catalog'
 import { detectEcsLauncherCapability } from './ecs/launcher-capability'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -1083,6 +1084,10 @@ export class ProjectAgent {
         // Can run server-setup recipes against Windows hosts over OpenSSH; the
         // api requires this before dispatching a Windows run.
         SERVER_SETUP_WINDOWS_OPENSSH_CAPABILITY,
+        // Can run the alarm AI check's catalog-only read-only diagnostics
+        // (`readonly_diagnostic`); the api dispatches them only to replicas
+        // that advertise this capability.
+        READONLY_DIAGNOSTIC_CAPABILITY,
         ...(ecsLauncher ? ['ecs_launch'] : []),
       ],
       availableChatModes: this.configSyncState.availableChatModes,

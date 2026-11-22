@@ -257,7 +257,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'ssh_source_ip_sync_v1', 'server_setup_windows_openssh_v1', 'ecs_launch',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'ssh_source_ip_sync_v1', 'server_setup_windows_openssh_v1', 'readonly_diagnostic_v1', 'ecs_launch',
       ])
 
       agent.stop()
@@ -293,6 +293,21 @@ describe('ProjectAgent', () => {
       agent.stop()
     })
 
+    it('should always advertise the readonly_diagnostic_v1 capability', async () => {
+      // The api only dispatches alarm AI-check read-only diagnostics to
+      // replicas that advertise this capability.
+      mockDetectEcsLauncherCapability.mockResolvedValue(false)
+      const agent = new ProjectAgent(project, 'agent-1', options)
+      agent.start()
+
+      await jest.advanceTimersByTimeAsync(100)
+
+      const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
+      expect(payload.capabilities).toContain('readonly_diagnostic_v1')
+
+      agent.stop()
+    })
+
     it('should not advertise ecs_launch when AWS credentials are not resolvable', async () => {
       mockDetectEcsLauncherCapability.mockResolvedValue(false)
       const agent = new ProjectAgent(project, 'agent-1', options)
@@ -302,7 +317,7 @@ describe('ProjectAgent', () => {
 
       const payload = mockClient.register.mock.calls[0][0] as { capabilities: string[] }
       expect(payload.capabilities).toEqual([
-        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'ssh_source_ip_sync_v1', 'server_setup_windows_openssh_v1',
+        'shell', 'file_read', 'file_write', 'process_manage', 'chat', 'terminal', 'vscode', 'server_setup_custom_tasks', 'server_setup_sentry_v1', 'ssh_source_ip_sync_v1', 'server_setup_windows_openssh_v1', 'readonly_diagnostic_v1',
       ])
       expect(payload.capabilities).not.toContain('ecs_launch')
 
