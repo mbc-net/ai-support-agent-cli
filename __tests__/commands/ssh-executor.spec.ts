@@ -134,6 +134,20 @@ describe('executeSshCommand', () => {
       expect(connectConfig.sock).toBeUndefined()
     })
 
+    it('does not restrict host key algorithms by default', async () => {
+      const promise = executeSshCommand(directCredential(), 'echo hi', 5)
+      await completeExec(0, 'hi\n', '')
+      await promise
+      expect(lastClient!.connect.mock.calls[0][0].algorithms).toBeUndefined()
+    })
+
+    it('restricts negotiation to the pinned key type when hostKeyAlgorithms is given', async () => {
+      const promise = executeSshCommand(directCredential(), 'echo hi', 5, { hostKeyAlgorithms: ['ssh-ed25519'] })
+      await completeExec(0, 'hi\n', '')
+      await promise
+      expect(lastClient!.connect.mock.calls[0][0].algorithms).toEqual({ serverHostKey: ['ssh-ed25519'] })
+    })
+
     it('defaults to port 22 when credential.port is falsy', async () => {
       const promise = executeSshCommand(directCredential({ port: 0 }), 'echo hi', 5)
       await completeExec(0, 'hi\n', '')

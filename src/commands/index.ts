@@ -356,6 +356,15 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       return errorResult('readonly_diagnostic requires client context')
     }
     const payload = p as ReadonlyDiagnosticPayload
+    const commandId = opts.commandId
+    // Every rejection is logged at info with only the command id, the catalog
+    // id (when it is a plain identifier) and a fixed reason code — never the
+    // command output, the credential or key material.
+    const reject = (catalogId: unknown, reason: string, error: string): CommandResult => {
+      const id = typeof catalogId === 'string' && /^[a-z_]{1,64}$/.test(catalogId) ? catalogId : 'invalid'
+      logger.info(`[readonly_diagnostic] rejected commandId=${commandId} catalogId=${id} reason=${reason}`)
+      return errorResult(error)
+    }
     const {
       buildLogTailPreflight,
       buildReadonlyDiagnostic,
@@ -385,15 +394,20 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
           })
         : null
     if (!built) {
-      return errorResult('readonly_diagnostic rejected: invalid catalog request')
+      return reject(payload.catalogId, 'invalid_catalog_request', 'readonly_diagnostic rejected: invalid catalog request')
     }
     const command = readonlyDiagnosticCommandText(built.argv)
     if (command !== payload.expectedCommand) {
-      return errorResult('readonly_diagnostic rejected: command mismatch')
+      return reject(built.id, 'command_mismatch', 'readonly_diagnostic rejected: command mismatch')
     }
     const blocked = validateCommand(command)
     if (blocked) {
-      return errorResult(`readonly_diagnostic rejected: ${blocked}`)
+      return reject(built.id, 'command_blocked', `readonly_diagnostic rejected: ${blocked}`)
+    }
+    // The asset UID namespaces the host-key pin server setup recorded for it.
+    const assetUid = payload.assetUid
+    if (typeof assetUid !== 'string' || !assetUid) {
+      return reject(built.id, 'invalid_asset', 'readonly_diagnostic rejected: invalid asset')
     }
 
     const rawTimeout = payload.timeoutSeconds
@@ -410,12 +424,12 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     const logRoots = allowedLogRoots as string[]
     const preflight = built.id === 'log_tail' ? buildLogTailPreflight(String(built.params.path), logRoots) : undefined
     if (preflight === null) {
-      return errorResult('readonly_diagnostic rejected: invalid catalog request')
+      return reject(built.id, 'invalid_catalog_request', 'readonly_diagnostic rejected: invalid catalog request')
     }
     if (preflight) {
       for (const argv of [preflight.resolve, preflight.regularFile]) {
         const preflightBlocked = validateCommand(readonlyDiagnosticCommandText(argv))
-        if (preflightBlocked) return errorResult(`readonly_diagnostic rejected: ${preflightBlocked}`)
+        if (preflightBlocked) return reject(built.id, 'command_blocked', `readonly_diagnostic rejected: ${preflightBlocked}`)
       }
     }
 
@@ -427,6 +441,15 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     } catch (error) {
       return errorResult(`Failed to fetch read-only diagnostic credential: ${getErrorMessage(error)}`)
     }
+    // Ledger connections carry no host-key fingerprint: fall back to the key
+    // server setup pinned for this asset (read-only; never TOFU here). Done
+    // after the fetch (host/port come from the credential), before any SSH.
+    const { resolveReadonlyDiagnosticHostKey } = await import('./readonly-diagnostic-host-key')
+    const hostKey = await resolveReadonlyDiagnosticHostKey(credential, assetUid, opts.client.getTenantCode())
+    if (!hostKey.ok) {
+      return reject(built.id, hostKey.reason, hostKey.error)
+    }
+    const { credential: pinnedCredential, hostKeyAlgorithms } = hostKey
     try {
       const { executeSshCommand } = await import('./ssh-executor')
       // All SSH calls share one timeout budget so the whole run stays within
@@ -435,7 +458,10 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       const runRemote = async (argv: readonly string[]): Promise<string | null> => {
         const remainingSeconds = Math.ceil((deadline - Date.now()) / 1000)
         if (remainingSeconds <= 0) return null
-        return executeSshCommand(credential, readonlyDiagnosticCommandText(argv), remainingSeconds)
+        const text = readonlyDiagnosticCommandText(argv)
+        return hostKeyAlgorithms
+          ? executeSshCommand(pinnedCredential, text, remainingSeconds, { hostKeyAlgorithms })
+          : executeSshCommand(pinnedCredential, text, remainingSeconds)
       }
 
       if (preflight) {
@@ -446,12 +472,12 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
         // match also proves readlink succeeded. Equality with the requested
         // path means no component is a symlink; re-check the allowlist anyway.
         if (resolved !== `${path}\n` || validateReadonlyLogPath(resolved.slice(0, -1), logRoots) === null) {
-          return errorResult('readonly_diagnostic rejected: log path is not a plain file under the allowlist (symlink or missing)')
+          return reject(built.id, 'log_path_not_plain', 'readonly_diagnostic rejected: log path is not a plain file under the allowlist (symlink or missing)')
         }
         const regular = await runRemote(preflight.regularFile)
         if (regular === null) return errorResult('readonly_diagnostic timed out')
         if (regular !== '') {
-          return errorResult('readonly_diagnostic rejected: log path is not a regular file')
+          return reject(built.id, 'log_path_not_regular', 'readonly_diagnostic rejected: log path is not a regular file')
         }
       }
 
