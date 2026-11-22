@@ -85,11 +85,16 @@ async function createTailscaleSocksSocket(credential: SshExecCredential): Promis
  * returning combined stdout/stderr formatted the same way as the api-side
  * `SshTool.executeViaSsh`: plain stdout on a clean (0) exit, or an
  * "Exit code: N\nSTDOUT:\n...\nSTDERR:\n..." block otherwise.
+ *
+ * `options.hostKeyAlgorithms` restricts host-key negotiation to the algorithms
+ * that present the pinned key's type, so a pin taken from known_hosts (one
+ * key type) is not defeated by the server offering a different type first.
  */
 export async function executeSshCommand(
   credential: SshExecCredential,
   command: string,
   timeoutSeconds: number = DEFAULT_SSH_EXEC_TIMEOUT_SECONDS,
+  options: { hostKeyAlgorithms?: readonly string[] } = {},
 ): Promise<string> {
   if (!credential.hostname || !credential.username || !credential.authType) {
     throw new Error('SSH connection requires hostname, username, and authType to be set')
@@ -173,6 +178,9 @@ export async function executeSshCommand(
       ...(credential.authType === 'password'
         ? { password: credential.privateKey }
         : { privateKey: credential.privateKey }),
+    }
+    if (options.hostKeyAlgorithms) {
+      connectConfig.algorithms = { serverHostKey: [...options.hostKeyAlgorithms] }
     }
 
     if (sock) {
