@@ -27,11 +27,31 @@ jest.mock('../../src/security', () => {
   }
 })
 
+// Isolate the persistent config dir (server-setup known_hosts files live under
+// it) the same way __tests__/utils/known-hosts-store.spec.ts does.
+jest.mock('../../src/constants', () => {
+  const actual = jest.requireActual('../../src/constants')
+  return { ...actual, CONFIG_DIR: '.ai-support-agent-test-readonly-diag-' + process.pid }
+})
+jest.mock('os', () => {
+  const originalOs = jest.requireActual('os')
+  return { ...originalOs, homedir: () => require('os').tmpdir() }
+})
+
+import { createHash, createHmac, randomBytes } from 'crypto'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
+
 import { executeCommand } from '../../src/commands'
 import type { ApiClient } from '../../src/api-client'
 import type { ReadonlyDiagnosticPayload } from '../../src/types'
+import { knownHostsDir } from '../../src/utils/known-hosts-store'
+
+const TEST_CONFIG_DIR = path.join(os.tmpdir(), '.ai-support-agent-test-readonly-diag-' + process.pid)
 
 const SECRET = 'SECRET-PRIVATE-KEY-MATERIAL'
+const API_FINGERPRINT = `SHA256:${createHash('sha256').update('api-pinned-key').digest('base64').replace(/=+$/, '')}`
 const CREDENTIAL = {
   hostId: 'asset-1',
   hostname: 'db1.internal',
@@ -39,10 +59,14 @@ const CREDENTIAL = {
   username: 'readonly',
   authType: 'private_key',
   privateKey: SECRET,
+  hostKeyFingerprint: API_FINGERPRINT,
 }
 
 const mockGetCredential = jest.fn()
-const CLIENT = { getReadonlyDiagnosticCredential: mockGetCredential } as unknown as ApiClient
+const CLIENT = {
+  getReadonlyDiagnosticCredential: mockGetCredential,
+  getTenantCode: () => '00000009',
+} as unknown as ApiClient
 const OPTS = { client: CLIENT, commandId: 'cmd-1', agentId: 'agent-1' }
 
 function payload(overrides: Partial<ReadonlyDiagnosticPayload> = {}): Record<string, unknown> {
@@ -450,5 +474,217 @@ describe('readonly_diagnostic dispatch', () => {
     expect(result.success).toBe(true)
     const logged = JSON.stringify(Object.values(mockLogger).map((fn) => fn.mock.calls))
     expect(logged).not.toContain('SENSITIVE-OUTPUT-LINE')
+  })
+
+  describe('host key pin', () => {
+    const ASSET_UID = '01M7WSFAK2W2V29AX1T7KMPG2F'
+    const NOT_PINNED = 'readonly_diagnostic rejected: host key is not pinned for this asset; run a server setup recipe against it first'
+    const UPTIME = { catalogId: 'uptime', params: {}, expectedCommand: 'uptime', allowedLogPaths: [], assetUid: ASSET_UID }
+    const { hostKeyFingerprint: _omit, ...unpinned } = CREDENTIAL
+    const LEDGER_CREDENTIAL = { ...unpinned, hostId: ASSET_UID }
+
+    function sshString(value: Buffer | string): Buffer {
+      const body = Buffer.isBuffer(value) ? value : Buffer.from(value)
+      const len = Buffer.alloc(4)
+      len.writeUInt32BE(body.length)
+      return Buffer.concat([len, body])
+    }
+    function ed25519Blob(): Buffer {
+      return Buffer.concat([sshString('ssh-ed25519'), sshString(randomBytes(32))])
+    }
+    function fingerprintOf(blob: Buffer): string {
+      return `SHA256:${createHash('sha256').update(blob).digest('base64').replace(/=+$/, '')}`
+    }
+    function hashedHost(name: string): string {
+      const salt = randomBytes(20)
+      return `|1|${salt.toString('base64')}|${createHmac('sha1', salt).update(name).digest('base64')}`
+    }
+    // Server setup's file for (tenant 00000009, sshHostId = asset UID), named
+    // exactly like production: 00000009__01m7wsfak2w2v29ax1t7kmpg2f.
+    const pinFile = () => path.join(knownHostsDir(), '00000009__01m7wsfak2w2v29ax1t7kmpg2f')
+    function writePins(lines: string[]): void {
+      fs.mkdirSync(knownHostsDir(), { recursive: true })
+      fs.writeFileSync(pinFile(), `${lines.join('\n')}\n`)
+    }
+    const line = (hosts: string, blob: Buffer, marker = '') =>
+      `${marker ? `${marker} ` : ''}${hosts} ssh-ed25519 ${blob.toString('base64')}`
+
+    function expectRejectedWithoutSsh(result: unknown, error: string, reason: string): void {
+      expect(result).toEqual({ success: false, error })
+      expect(mockGetCredential).toHaveBeenCalledTimes(1)
+      expect(mockExecuteSshCommand).not.toHaveBeenCalled()
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        `[readonly_diagnostic] rejected commandId=cmd-1 catalogId=uptime reason=${reason}`,
+      )
+    }
+
+    beforeEach(() => {
+      mockGetCredential.mockResolvedValue(LEDGER_CREDENTIAL)
+    })
+    afterEach(() => {
+      fs.rmSync(TEST_CONFIG_DIR, { recursive: true, force: true })
+    })
+
+    it('uses a fingerprint the credential already carries, unchanged, without touching known_hosts', async () => {
+      mockGetCredential.mockResolvedValue({ ...CREDENTIAL, hostId: ASSET_UID })
+      const result = await run(payload(UPTIME))
+      expect(result.success).toBe(true)
+      expect(mockExecuteSshCommand.mock.calls).toEqual([[{ ...CREDENTIAL, hostId: ASSET_UID }, 'uptime', 25]])
+      expect(fs.existsSync(TEST_CONFIG_DIR)).toBe(false)
+    })
+
+    it('rejects a malformed fingerprint on the credential', async () => {
+      mockGetCredential.mockResolvedValue({ ...LEDGER_CREDENTIAL, hostKeyFingerprint: 'SHA256:short' })
+      expectRejectedWithoutSsh(
+        await run(payload(UPTIME)),
+        'readonly_diagnostic rejected: credential host key fingerprint is malformed',
+        'host_key_fingerprint_malformed',
+      )
+    })
+
+    it('pins the key server setup recorded for the asset and restricts negotiation to its type', async () => {
+      const blob = ed25519Blob()
+      writePins([line('db1.internal', blob)])
+      const result = await run(payload(UPTIME))
+      expect(result.success).toBe(true)
+      expect(mockExecuteSshCommand.mock.calls).toEqual([[
+        { ...LEDGER_CREDENTIAL, hostKeyFingerprint: fingerprintOf(blob) },
+        'uptime',
+        25,
+        { hostKeyAlgorithms: ['ssh-ed25519'] },
+      ]])
+    })
+
+    it('uses the pinned key for every SSH call of a log_tail run', async () => {
+      const blob = ed25519Blob()
+      writePins([line('db1.internal', blob)])
+      await run(payload({ assetUid: ASSET_UID }))
+      expect(mockExecuteSshCommand).toHaveBeenCalledTimes(3)
+      for (const call of mockExecuteSshCommand.mock.calls) {
+        expect(call[0]).toEqual({ ...LEDGER_CREDENTIAL, hostKeyFingerprint: fingerprintOf(blob) })
+        expect(call[3]).toEqual({ hostKeyAlgorithms: ['ssh-ed25519'] })
+      }
+    })
+
+    it('matches a hashed [host]:port entry for a non-22 port', async () => {
+      const blob = ed25519Blob()
+      writePins([line(hashedHost('[db1.internal]:2222'), blob)])
+      mockGetCredential.mockResolvedValue({ ...LEDGER_CREDENTIAL, port: 2222 })
+      const result = await run(payload(UPTIME))
+      expect(result.success).toBe(true)
+      expect(mockExecuteSshCommand.mock.calls[0][0].hostKeyFingerprint).toBe(fingerprintOf(blob))
+    })
+
+    it('matches a plain [host]:port entry inside a comma list', async () => {
+      const blob = ed25519Blob()
+      writePins([line('other.internal,[db1.internal]:2222', blob)])
+      mockGetCredential.mockResolvedValue({ ...LEDGER_CREDENTIAL, port: 2222 })
+      expect((await run(payload(UPTIME))).success).toBe(true)
+      expect(mockExecuteSshCommand.mock.calls[0][0].hostKeyFingerprint).toBe(fingerprintOf(blob))
+    })
+
+    it('rejects when no known_hosts file exists, and never creates it', async () => {
+      expectRejectedWithoutSsh(await run(payload(UPTIME)), NOT_PINNED, 'host_key_not_pinned')
+      expect(fs.existsSync(knownHostsDir())).toBe(false)
+      fs.mkdirSync(knownHostsDir(), { recursive: true })
+      await run(payload(UPTIME))
+      expect(fs.readdirSync(knownHostsDir())).toEqual([])
+    })
+
+    it('rejects when the file pins only other hosts / ports', async () => {
+      writePins([line('db2.internal', ed25519Blob()), line('[db1.internal]:2222', ed25519Blob())])
+      expectRejectedWithoutSsh(await run(payload(UPTIME)), NOT_PINNED, 'host_key_not_pinned')
+    })
+
+    it('never trusts a @revoked key', async () => {
+      const blob = ed25519Blob()
+      writePins([line('db1.internal', blob), line('*', blob, '@revoked')])
+      expectRejectedWithoutSsh(await run(payload(UPTIME)), NOT_PINNED, 'host_key_not_pinned')
+    })
+
+    it('rejects two different pinned keys of the same type as ambiguous', async () => {
+      writePins([line('db1.internal', ed25519Blob()), line(hashedHost('db1.internal'), ed25519Blob())])
+      expectRejectedWithoutSsh(
+        await run(payload(UPTIME)),
+        'readonly_diagnostic rejected: several different host keys are pinned for this asset; remove the stale entry from its server-setup known_hosts file',
+        'host_key_ambiguous',
+      )
+    })
+
+    it('looks up a tailscale credential by its tailnet hostname, like server setup', async () => {
+      const blob = ed25519Blob()
+      writePins([line('db1.tail1234.ts.net', blob)])
+      const tailscale = { ...LEDGER_CREDENTIAL, connectionType: 'tailscale', tailnetHostname: 'db1.tail1234.ts.net' }
+      mockGetCredential.mockResolvedValue(tailscale)
+      expect((await run(payload(UPTIME))).success).toBe(true)
+      expect(mockExecuteSshCommand.mock.calls[0][0]).toEqual({ ...tailscale, hostKeyFingerprint: fingerprintOf(blob) })
+    })
+
+    it('does not accept a tailscale credential pinned only under its ledger hostname', async () => {
+      writePins([line('db1.internal', ed25519Blob())])
+      mockGetCredential.mockResolvedValue({ ...LEDGER_CREDENTIAL, connectionType: 'tailscale', tailnetHostname: 'db1.tail1234.ts.net' })
+      expectRejectedWithoutSsh(await run(payload(UPTIME)), NOT_PINNED, 'host_key_not_pinned')
+    })
+
+    it('rejects a tailscale credential without a tailnet hostname', async () => {
+      writePins([line('db1.internal', ed25519Blob())])
+      mockGetCredential.mockResolvedValue({ ...LEDGER_CREDENTIAL, connectionType: 'tailscale' })
+      expectRejectedWithoutSsh(
+        await run(payload(UPTIME)),
+        'readonly_diagnostic rejected: credential host or port is invalid',
+        'credential_host_invalid',
+      )
+    })
+
+    it('rejects as not pinned when the client has no tenant code', async () => {
+      writePins([line('db1.internal', ed25519Blob())])
+      const result = await run(payload(UPTIME), { ...OPTS, client: { ...CLIENT, getTenantCode: () => '' } })
+      expectRejectedWithoutSsh(result, NOT_PINNED, 'tenant_code_missing')
+    })
+
+    it('rejects a credential issued for another host id', async () => {
+      writePins([line('db1.internal', ed25519Blob())])
+      mockGetCredential.mockResolvedValue({ ...LEDGER_CREDENTIAL, hostId: 'someone-else' })
+      expectRejectedWithoutSsh(
+        await run(payload(UPTIME)),
+        'readonly_diagnostic rejected: credential does not belong to this asset',
+        'credential_asset_mismatch',
+      )
+    })
+
+    it.each<[string, unknown]>([['missing', undefined], ['empty', ''], ['non-string', 1]])(
+      'rejects a %s assetUid before fetching the credential',
+      async (_label, assetUid) => {
+        const result = await run(payload({ ...UPTIME, assetUid }))
+        expect(result).toEqual({ success: false, error: 'readonly_diagnostic rejected: invalid asset' })
+        expect(mockGetCredential).not.toHaveBeenCalled()
+        expect(mockLogger.info).toHaveBeenCalledWith(
+          '[readonly_diagnostic] rejected commandId=cmd-1 catalogId=uptime reason=invalid_asset',
+        )
+      },
+    )
+
+    it('logs earlier rejections with only the commandId and catalogId', async () => {
+      await run(payload({ expectedCommand: 'tail -n 51 -- /var/log/syslog' }))
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        '[readonly_diagnostic] rejected commandId=cmd-1 catalogId=log_tail reason=command_mismatch',
+      )
+      await run(payload({ catalogId: 'rm\nINJECTED', params: {}, expectedCommand: 'rm' }))
+      expect(mockLogger.info).toHaveBeenLastCalledWith(
+        '[readonly_diagnostic] rejected commandId=cmd-1 catalogId=invalid reason=invalid_catalog_request',
+      )
+    })
+
+    it('never logs key material, the credential or the known_hosts path contents', async () => {
+      const blob = ed25519Blob()
+      writePins([line('db1.internal', blob)])
+      await run(payload(UPTIME))
+      writePins([line('db1.internal', blob), line('db1.internal', ed25519Blob())])
+      await run(payload(UPTIME))
+      const logged = JSON.stringify(Object.values(mockLogger).map((fn) => fn.mock.calls))
+      expect(logged).not.toContain(SECRET)
+      expect(logged).not.toContain(blob.toString('base64'))
+      expect(logged).not.toContain(fingerprintOf(blob))
+    })
   })
 })

@@ -40,6 +40,16 @@ export function knownHostsDir(): string {
 }
 
 /**
+ * Path of the persistent known_hosts file for a tenant/host pair, WITHOUT
+ * creating the directory or the file. Read-only consumers (e.g. the
+ * readonly_diagnostic host-key pin lookup) must use this so a lookup never
+ * turns into a TOFU "first use".
+ */
+export function knownHostsFilePath(tenantCode: string, sshHostId: string): string {
+  return path.join(knownHostsDir(), `${sanitizeNameSegment(tenantCode)}__${sanitizeNameSegment(sshHostId)}`)
+}
+
+/**
  * Resolve (and ensure exists) the persistent known_hosts file path for a
  * given tenant/host pair.
  *
@@ -52,11 +62,9 @@ export function knownHostsDir(): string {
  * accepted.
  */
 export function resolveKnownHostsPath(tenantCode: string, sshHostId: string): string {
-  const dir = knownHostsDir()
-  ensureDir(dir, 0o700)
+  ensureDir(knownHostsDir(), 0o700)
 
-  const fileName = `${sanitizeNameSegment(tenantCode)}__${sanitizeNameSegment(sshHostId)}`
-  const filePath = path.join(dir, fileName)
+  const filePath = knownHostsFilePath(tenantCode, sshHostId)
   if (!fs.existsSync(filePath)) {
     fs.writeFileSync(filePath, '', { mode: 0o600 })
   }
