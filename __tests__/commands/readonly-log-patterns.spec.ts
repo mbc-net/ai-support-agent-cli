@@ -11,6 +11,7 @@ import {
   buildLogDirPreflight,
   buildReadonlyDiagnostic,
   filterLogListOutput,
+  globMatch,
   isAllowedLogFile,
   LastLines,
   quoteArg,
@@ -155,6 +156,15 @@ describe('isAllowedLogFile', () => {
     expect(isAllowedLogFile('/etc/hosts', ['/etc/*'], ['/etc/'])).toBe(false)
   })
 
+  it("ReDoS regression: '*a*a*a*a*a*a*a*a*a*a*a*a*b' vs 200 a's returns false in < 50 ms", () => {
+    const glob = '*a*a*a*a*a*a*a*a*a*a*a*a*b'
+    const started = process.hrtime.bigint()
+    expect(globMatch(glob, 'a'.repeat(200))).toBe(false)
+    expect(isAllowedLogFile(`/var/log/${'a'.repeat(190)}`, [`/var/log/${glob}`])).toBe(false)
+    expect(Number(process.hrtime.bigint() - started) / 1e6).toBeLessThan(50)
+    expect(globMatch(glob, `${'a'.repeat(12)}b`)).toBe(true)
+  })
+
   it('does not backtrack catastrophically on many stars', () => {
     const pattern = `/var/log/${'a*'.repeat(40)}b`
     const started = Date.now()
@@ -226,29 +236,29 @@ describe('log_list / log_tail / log_grep argv', () => {
       'log_tail',
       { path: '/var/log/app/release_error.log.2.gz', lines: 20 },
       { path: '/var/log/app/release_error.log.2.gz', lines: 20 },
-      ['gzip', '-dc', '--', '/var/log/app/release_error.log.2.gz'],
-      'gzip -dc -- /var/log/app/release_error.log.2.gz',
+      ['timeout', '60', 'nice', '-n', '19', 'ionice', '-c', '3', 'gzip', '-dc', '--', '/var/log/app/release_error.log.2.gz'],
+      'timeout 60 nice -n 19 ionice -c 3 gzip -dc -- /var/log/app/release_error.log.2.gz',
     ],
     [
       'log_grep',
       { path: '/var/log/syslog', text: 'Out of memory' },
       { path: '/var/log/syslog', text: 'Out of memory', lines: 100 },
-      ['grep', '-F', '-n', '-e', 'Out of memory', '--', '/var/log/syslog'],
-      "grep -F -n -e 'Out of memory' -- /var/log/syslog",
+      ['timeout', '60', 'nice', '-n', '19', 'ionice', '-c', '3', 'grep', '-F', '-n', '-e', 'Out of memory', '--', '/var/log/syslog'],
+      "timeout 60 nice -n 19 ionice -c 3 grep -F -n -e 'Out of memory' -- /var/log/syslog",
     ],
     [
       'log_grep',
       { path: '/var/log/app/release_error.log.3.gz', text: 'ERROR', lines: 5 },
       { path: '/var/log/app/release_error.log.3.gz', text: 'ERROR', lines: 5 },
-      ['zgrep', '-F', '-n', '-e', 'ERROR', '--', '/var/log/app/release_error.log.3.gz'],
-      'zgrep -F -n -e ERROR -- /var/log/app/release_error.log.3.gz',
+      ['timeout', '60', 'nice', '-n', '19', 'ionice', '-c', '3', 'zgrep', '-F', '-n', '-e', 'ERROR', '--', '/var/log/app/release_error.log.3.gz'],
+      'timeout 60 nice -n 19 ionice -c 3 zgrep -F -n -e ERROR -- /var/log/app/release_error.log.3.gz',
     ],
     [
       'log_grep',
       { path: '/opt/myapp/logs/a.log', text: 'user@example.com (id=1) 100% #2 a:b/c,d+e-f' },
       { path: '/opt/myapp/logs/a.log', text: 'user@example.com (id=1) 100% #2 a:b/c,d+e-f', lines: 100 },
-      ['grep', '-F', '-n', '-e', 'user@example.com (id=1) 100% #2 a:b/c,d+e-f', '--', '/opt/myapp/logs/a.log'],
-      "grep -F -n -e 'user@example.com (id=1) 100% #2 a:b/c,d+e-f' -- /opt/myapp/logs/a.log",
+      ['timeout', '60', 'nice', '-n', '19', 'ionice', '-c', '3', 'grep', '-F', '-n', '-e', 'user@example.com (id=1) 100% #2 a:b/c,d+e-f', '--', '/opt/myapp/logs/a.log'],
+      "timeout 60 nice -n 19 ionice -c 3 grep -F -n -e 'user@example.com (id=1) 100% #2 a:b/c,d+e-f' -- /opt/myapp/logs/a.log",
     ],
   ])('%s %j', (id, params, expectedParams, argv, command) => {
     const built = buildReadonlyDiagnostic(id, params, OPTIONS)
@@ -285,6 +295,24 @@ describe('log_list / log_tail / log_grep argv', () => {
     ['log_grep extra key', 'log_grep', { path: '/var/log/syslog', text: 'a', pattern: 'x' }],
   ])('rejects %s', (_label, id, params) => {
     expect(buildReadonlyDiagnostic(id, params, OPTIONS)).toBeNull()
+  })
+
+  it('passes a search text starting with - as the -e value (never as an option)', () => {
+    const built = buildReadonlyDiagnostic('log_grep', { path: '/var/log/syslog', text: '-x (code=500) #1' }, OPTIONS)
+    const eIndex = built!.argv.indexOf('-e')
+    expect(built!.argv[eIndex + 1]).toBe('-x (code=500) #1')
+    const command = readonlyDiagnosticCommandText(built!.argv)!
+    expect(command).toBe("timeout 60 nice -n 19 ionice -c 3 grep -F -n -e '-x (code=500) #1' -- /var/log/syslog")
+    expect(validateCommand(command)).toBeNull()
+    const plain = buildReadonlyDiagnostic('log_grep', { path: '/var/log/syslog', text: '-x' }, OPTIONS)
+    const plainCommand = readonlyDiagnosticCommandText(plain!.argv)!
+    expect(plainCommand).toBe('timeout 60 nice -n 19 ionice -c 3 grep -F -n -e -x -- /var/log/syslog')
+    expect(validateCommand(plainCommand)).toBeNull()
+  })
+
+  it('plain tail and find stay without the resource-cap prefix', () => {
+    expect(buildReadonlyDiagnostic('log_tail', { path: '/var/log/syslog' }, OPTIONS)?.argv[0]).toBe('tail')
+    expect(buildReadonlyDiagnostic('log_list', { pattern: '/var/log/syslog' }, OPTIONS)?.argv[0]).toBe('find')
   })
 
   it('accepts a 100-char grep text and the lines bounds', () => {

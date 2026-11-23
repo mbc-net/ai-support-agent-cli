@@ -579,7 +579,7 @@ describe('readonly_diagnostic dispatch', () => {
       const GZ = '/var/log/app/release_error.log.2.gz'
       const gzPayload = () => payload({
         params: { path: GZ, lines: 3 },
-        expectedCommand: `gzip -dc -- ${GZ}`,
+        expectedCommand: `timeout 60 nice -n 19 ionice -c 3 gzip -dc -- ${GZ}`,
         allowedLogPaths: [PATTERN],
       })
 
@@ -592,11 +592,11 @@ describe('readonly_diagnostic dispatch', () => {
         ])
         expect(mockExecuteSshCommandStreaming).toHaveBeenCalledTimes(1)
         const [cred, command, timeout, options] = mockExecuteSshCommandStreaming.mock.calls[0]
-        expect([cred, command, timeout]).toEqual([CREDENTIAL, `gzip -dc -- ${GZ}`, 25])
+        expect([cred, command, timeout]).toEqual([CREDENTIAL, `timeout 60 nice -n 19 ionice -c 3 gzip -dc -- ${GZ}`, 25])
         expect(options).toEqual({ onLine: expect.any(Function), maxBytes: 256 * 1024 * 1024 })
         expect(result).toEqual({
           success: true,
-          data: { command: `gzip -dc -- ${GZ}`, output: 'l3\nl4\nl5\n', truncated: false },
+          data: { command: `timeout 60 nice -n 19 ionice -c 3 gzip -dc -- ${GZ}`, output: 'l3\nl4\nl5\n', truncated: false },
         })
       })
 
@@ -605,7 +605,16 @@ describe('readonly_diagnostic dispatch', () => {
         const result = await run(gzPayload())
         expect(result).toEqual({
           success: true,
-          data: { command: `gzip -dc -- ${GZ}`, output: 'l1\nl2\n', truncated: true },
+          data: { command: `timeout 60 nice -n 19 ionice -c 3 gzip -dc -- ${GZ}`, output: 'l1\nl2\n', truncated: true },
+        })
+      })
+
+      it('treats exit 124 (remote timeout 60) as success with truncated=true and the last lines seen', async () => {
+        streamReturns(['l1', 'l2', 'l3', 'l4'], { exitCode: 124, stderr: 'Terminated\n' })
+        const result = await run(gzPayload())
+        expect(result).toEqual({
+          success: true,
+          data: { command: `timeout 60 nice -n 19 ionice -c 3 gzip -dc -- ${GZ}`, output: 'l2\nl3\nl4\n', truncated: true },
         })
       })
 
@@ -615,7 +624,7 @@ describe('readonly_diagnostic dispatch', () => {
         expect(result).toEqual({
           success: true,
           data: {
-            command: `gzip -dc -- ${GZ}`,
+            command: `timeout 60 nice -n 19 ionice -c 3 gzip -dc -- ${GZ}`,
             output: 'Exit code: 1\nSTDOUT:\nl1\n\nSTDERR:\ngzip: unexpected end of file\n',
             truncated: false,
           },
@@ -660,7 +669,7 @@ describe('readonly_diagnostic dispatch', () => {
       const grepPayload = (path: string, text: string, lines = 2, expectedCommand?: string) => payload({
         catalogId: 'log_grep',
         params: { path, text, lines },
-        expectedCommand: expectedCommand ?? `${path.endsWith('.gz') ? 'zgrep' : 'grep'} -F -n -e '${text}' -- ${path}`,
+        expectedCommand: expectedCommand ?? `timeout 60 nice -n 19 ionice -c 3 ${path.endsWith('.gz') ? 'zgrep' : 'grep'} -F -n -e '${text}' -- ${path}`,
         allowedLogPaths: [PATTERN],
       })
 
@@ -671,20 +680,20 @@ describe('readonly_diagnostic dispatch', () => {
           'readlink -e -- /var/log/app/release_error.log',
           'test -f /var/log/app/release_error.log',
         ])
-        expect(mockExecuteSshCommandStreaming.mock.calls[0][1]).toBe("grep -F -n -e 'a x' -- /var/log/app/release_error.log")
+        expect(mockExecuteSshCommandStreaming.mock.calls[0][1]).toBe("timeout 60 nice -n 19 ionice -c 3 grep -F -n -e 'a x' -- /var/log/app/release_error.log")
         expect(result).toEqual({
           success: true,
-          data: { command: "grep -F -n -e 'a x' -- /var/log/app/release_error.log", output: '5:a y\n9:a z\n', truncated: false },
+          data: { command: "timeout 60 nice -n 19 ionice -c 3 grep -F -n -e 'a x' -- /var/log/app/release_error.log", output: '5:a y\n9:a z\n', truncated: false },
         })
       })
 
       it('uses zgrep for .gz files', async () => {
         streamReturns(['3:boom'], { exitCode: 0 })
         const path = '/var/log/app/release_error.log.4.gz'
-        const result = await run(grepPayload(path, 'boom', 2, `zgrep -F -n -e boom -- ${path}`))
+        const result = await run(grepPayload(path, 'boom', 2, `timeout 60 nice -n 19 ionice -c 3 zgrep -F -n -e boom -- ${path}`))
         expect(result).toEqual({
           success: true,
-          data: { command: `zgrep -F -n -e boom -- ${path}`, output: '3:boom\n', truncated: false },
+          data: { command: `timeout 60 nice -n 19 ionice -c 3 zgrep -F -n -e boom -- ${path}`, output: '3:boom\n', truncated: false },
         })
       })
 
@@ -693,7 +702,7 @@ describe('readonly_diagnostic dispatch', () => {
         const result = await run(grepPayload('/var/log/app/release_error.log', 'a x'))
         expect(result).toEqual({
           success: true,
-          data: { command: "grep -F -n -e 'a x' -- /var/log/app/release_error.log", output: '', truncated: false },
+          data: { command: "timeout 60 nice -n 19 ionice -c 3 grep -F -n -e 'a x' -- /var/log/app/release_error.log", output: '', truncated: false },
         })
       })
 
@@ -703,6 +712,27 @@ describe('readonly_diagnostic dispatch', () => {
         expect((result as { data: { output: string } }).data.output).toBe('Exit code: 2\nSTDOUT:\n\nSTDERR:\ngrep: read error\n')
       })
 
+      it('treats a grep exit 124 (remote timeout) as success with truncated=true', async () => {
+        streamReturns(['1:a x'], { exitCode: 124 })
+        const result = await run(grepPayload('/var/log/app/release_error.log', 'a x'))
+        expect(result).toEqual({
+          success: true,
+          data: {
+            command: "timeout 60 nice -n 19 ionice -c 3 grep -F -n -e 'a x' -- /var/log/app/release_error.log",
+            output: '1:a x\n',
+            truncated: true,
+          },
+        })
+      })
+
+      it('passes a search text starting with - as the -e value', async () => {
+        streamReturns([], { exitCode: 1 })
+        const command = "timeout 60 nice -n 19 ionice -c 3 grep -F -n -e '-x (code=500)' -- /var/log/app/release_error.log"
+        const result = await run(grepPayload('/var/log/app/release_error.log', '-x (code=500)', 2, command))
+        expect(result.success).toBe(true)
+        expect(mockExecuteSshCommandStreaming.mock.calls[0][1]).toBe(command)
+      })
+
       it('marks truncated when the stream cap was hit', async () => {
         streamReturns(['1:a'], { exitCode: null, truncated: true })
         const result = await run(grepPayload('/var/log/app/release_error.log', 'a x'))
@@ -710,7 +740,7 @@ describe('readonly_diagnostic dispatch', () => {
       })
 
       it('rejects a search text the command blocklist refuses, before fetching the credential', async () => {
-        const result = await run(grepPayload('/var/log/app/release_error.log', 'sudo', 2, 'grep -F -n -e sudo -- /var/log/app/release_error.log'))
+        const result = await run(grepPayload('/var/log/app/release_error.log', 'sudo', 2, 'timeout 60 nice -n 19 ionice -c 3 grep -F -n -e sudo -- /var/log/app/release_error.log'))
         expect(result).toEqual({
           success: false,
           error: 'readonly_diagnostic rejected: Command blocked: contains a prohibited pattern',
@@ -825,7 +855,7 @@ describe('readonly_diagnostic dispatch', () => {
       const result = await run(payload({
         assetUid: ASSET_UID,
         params: { path: gz, lines: 10 },
-        expectedCommand: `gzip -dc -- ${gz}`,
+        expectedCommand: `timeout 60 nice -n 19 ionice -c 3 gzip -dc -- ${gz}`,
         allowedLogPaths: ['/var/log/app/release_error.log*'],
       }))
       expect(result.success).toBe(true)

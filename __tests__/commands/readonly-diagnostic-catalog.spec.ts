@@ -79,7 +79,7 @@ const VALID_CASES: ReadonlyArray<{
     id: 'log_grep',
     params: { path: '/var/log/nginx/error.log', text: 'upstream timed out' },
     expectedParams: { path: '/var/log/nginx/error.log', text: 'upstream timed out', lines: 100 },
-    argv: ['grep', '-F', '-n', '-e', 'upstream timed out', '--', '/var/log/nginx/error.log'],
+    argv: ['timeout', '60', 'nice', '-n', '19', 'ionice', '-c', '3', 'grep', '-F', '-n', '-e', 'upstream timed out', '--', '/var/log/nginx/error.log'],
   },
 ]
 

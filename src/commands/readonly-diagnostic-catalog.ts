@@ -284,7 +284,7 @@ export function validateReadonlyLogPattern(pattern: unknown, roots: readonly str
  * exactly one character, case-sensitive). Linear-time greedy matcher (no
  * regex backtracking).
  */
-function globMatch(glob: string, name: string): boolean {
+export function globMatch(glob: string, name: string): boolean {
   let g = 0
   let n = 0
   let starG = -1
@@ -410,6 +410,16 @@ function parseGrepText(value: unknown): string | null {
 
 const isGzip = (path: string): boolean => path.endsWith('.gz')
 
+/**
+ * Remote resource cap for commands that may scan large inputs (`log_grep`,
+ * `.gz` `log_tail`): at most 60 s, lowest CPU and idle I/O priority. Exit
+ * code 124 means the remote timeout fired.
+ */
+export const READONLY_REMOTE_RESOURCE_CAP = ['timeout', '60', 'nice', '-n', '19', 'ionice', '-c', '3'] as const
+
+/** Exit code of `timeout` when it stopped the command. */
+export const READONLY_REMOTE_TIMEOUT_EXIT_CODE = 124
+
 const fixed = (argv: readonly string[]): CatalogEntry => ({
   keys: [],
   build: () => ({ params: {}, argv: [...argv] }),
@@ -447,7 +457,9 @@ const CATALOG: Readonly<Record<ReadonlyDiagnosticId, CatalogEntry>> = {
       const lines = parseLines(p.lines)
       const path = parseLogFile(p.path, options)
       if (lines === null || path === null) return null
-      const argv = isGzip(path) ? ['gzip', '-dc', '--', path] : ['tail', '-n', String(lines), '--', path]
+      const argv = isGzip(path)
+        ? [...READONLY_REMOTE_RESOURCE_CAP, 'gzip', '-dc', '--', path]
+        : ['tail', '-n', String(lines), '--', path]
       return { params: { path, lines }, argv }
     },
   },
@@ -475,7 +487,7 @@ const CATALOG: Readonly<Record<ReadonlyDiagnosticId, CatalogEntry>> = {
       if (lines === null || path === null || text === null) return null
       return {
         params: { path, text, lines },
-        argv: [isGzip(path) ? 'zgrep' : 'grep', '-F', '-n', '-e', text, '--', path],
+        argv: [...READONLY_REMOTE_RESOURCE_CAP, isGzip(path) ? 'zgrep' : 'grep', '-F', '-n', '-e', text, '--', path],
       }
     },
   },

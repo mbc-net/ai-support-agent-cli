@@ -376,6 +376,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES,
       READONLY_LOG_ROOTS_MAX,
       READONLY_LOG_STREAM_MAX_BYTES,
+      READONLY_REMOTE_TIMEOUT_EXIT_CODE,
       readonlyDiagnosticCommandText,
       TOP_PROCESSES_OUTPUT_LINES,
       truncateUtf8,
@@ -427,6 +428,11 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     // log_tail / log_grep (a concrete file) and log_list (its directory):
     // prepare the symlink / regular-file checks up front so a bad path is
     // rejected before the single-use credential is consumed.
+    // Known limitation (TOCTOU): the preflight and the read are separate SSH
+    // execs, so someone with write access to the log directory could swap the
+    // file for a symlink in between. Accepted: that already requires write
+    // access on the target host; the preflight stops misconfiguration and
+    // pre-existing symlinks, not a racing local attacker.
     const logRoots = allowedLogRoots as string[]
     const readsFile = built.id === 'log_tail' || built.id === 'log_grep'
     const preflight = readsFile ? buildLogTailPreflight(String(built.params.path), logRoots) : undefined
@@ -520,12 +526,18 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
         const kept = ring.text()
         // grep / zgrep exit 1 = no match: a success with empty output. A
         // stream cut at the byte cap has no exit code (we closed it).
-        const ok = result.truncated || result.exitCode === 0 || (built.id === 'log_grep' && result.exitCode === 1)
+        // Exit 124 = the remote `timeout 60` fired: the lines seen so far, truncated.
+        const remoteTimedOut = result.exitCode === READONLY_REMOTE_TIMEOUT_EXIT_CODE
+        const ok =
+          result.truncated ||
+          remoteTimedOut ||
+          result.exitCode === 0 ||
+          (built.id === 'log_grep' && result.exitCode === 1)
         const body = ok
           ? kept
           : `Exit code: ${result.exitCode}\nSTDOUT:\n${kept}${result.stderr ? `\nSTDERR:\n${result.stderr}` : ''}`
         const { text: output, truncated } = truncateUtf8(body, maxOutputBytes)
-        return successResult({ command, output, truncated: truncated || result.truncated })
+        return successResult({ command, output, truncated: truncated || result.truncated || remoteTimedOut })
       }
 
       const raw = await runRemote(built.argv)
