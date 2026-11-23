@@ -27,8 +27,24 @@ name: Ansible Roles
 # zabbix_server and zabbix_web, against an
 # ENABLED ufw — judged by the real `ufw show added` output (ufw normalises
 # `a.b.c.d/32` to `a.b.c.d` when it stores a rule).
-# `cloudfront_sync` exercises real UFW/nginx/systemd with fixture AWS retrieval
-# and real syntax/reload/partial-firewall failures and crash recovery. This
+# `cloudfront_sync` verifies the S0 refusal state: the role install is refused
+# at validation, every non-read CLI subcommand stops with
+# runtime_actor_not_connected, and read-only commands leave UFW, nginx, the
+# kernel rulesets and private state unchanged. It then runs the S1 nginx phase
+# against the container's real nginx: it stages the test bundle, a config with
+# nginx enabled and an nginx fixture (shared geo/realip includes and three
+# bundles with per-run secrets) and reloads nginx; inspect-runtime must report
+# admitted/nginx_policy_verified, failure/nginx_policy_unsupported with one
+# bundle's real_ip_recursive on, failure/nginx_observation_failed with a bundle
+# file replaced by a symlink (each restoration admitted again), with the host
+# and nginx's process identity unchanged around every command. The refused
+# subcommands are rerun against the nginx-enabled config without echoing a
+# secret. With nginx stopped, inspect-runtime must report
+# failure/nginx_policy_unsupported after its sandboxed nginx -T demonstrably
+# ran, leaving nginx stopped and the host unchanged; nginx is started again,
+# no secret may appear in outputs, files or the journal, and cleanup removes
+# the fixture and restarts nginx onto its original configuration. Real
+# forward/rollback/crash checks return with the S6 runtime session. This
 # container evidence does not replace the three Ubuntu VM release checks.
 # `ufw_reachability` runs the same ufw task files on a target container and
 # opens real TCP connections from an allowed client (listed as `<ip>/32`) and

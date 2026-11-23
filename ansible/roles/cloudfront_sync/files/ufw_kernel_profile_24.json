@@ -1,0 +1,5890 @@
+{
+  "families": {
+    "ip": {
+      "base_rules": [
+        "-A INPUT -j ufw-before-logging-input",
+        "-A INPUT -j ufw-before-input",
+        "-A INPUT -j ufw-after-input",
+        "-A INPUT -j ufw-after-logging-input",
+        "-A INPUT -j ufw-reject-input",
+        "-A INPUT -j ufw-track-input",
+        "-A FORWARD -j ufw-before-logging-forward",
+        "-A FORWARD -j ufw-before-forward",
+        "-A FORWARD -j ufw-after-forward",
+        "-A FORWARD -j ufw-after-logging-forward",
+        "-A FORWARD -j ufw-reject-forward",
+        "-A FORWARD -j ufw-track-forward",
+        "-A OUTPUT -j ufw-before-logging-output",
+        "-A OUTPUT -j ufw-before-output",
+        "-A OUTPUT -j ufw-after-output",
+        "-A OUTPUT -j ufw-after-logging-output",
+        "-A OUTPUT -j ufw-reject-output",
+        "-A OUTPUT -j ufw-track-output",
+        "-A ufw-after-input -p udp -m udp --dport 137 -j ufw-skip-to-policy-input",
+        "-A ufw-after-input -p udp -m udp --dport 138 -j ufw-skip-to-policy-input",
+        "-A ufw-after-input -p tcp -m tcp --dport 139 -j ufw-skip-to-policy-input",
+        "-A ufw-after-input -p tcp -m tcp --dport 445 -j ufw-skip-to-policy-input",
+        "-A ufw-after-input -p udp -m udp --dport 67 -j ufw-skip-to-policy-input",
+        "-A ufw-after-input -p udp -m udp --dport 68 -j ufw-skip-to-policy-input",
+        "-A ufw-after-input -m addrtype --dst-type BROADCAST -j ufw-skip-to-policy-input",
+        "-A ufw-after-logging-forward -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"",
+        "-A ufw-after-logging-input -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"",
+        "-A ufw-before-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+        "-A ufw-before-forward -p icmp -m icmp --icmp-type 3 -j ACCEPT",
+        "-A ufw-before-forward -p icmp -m icmp --icmp-type 11 -j ACCEPT",
+        "-A ufw-before-forward -p icmp -m icmp --icmp-type 12 -j ACCEPT",
+        "-A ufw-before-forward -p icmp -m icmp --icmp-type 8 -j ACCEPT",
+        "-A ufw-before-forward -j ufw-user-forward",
+        "-A ufw-before-input -i lo -j ACCEPT",
+        "-A ufw-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+        "-A ufw-before-input -m conntrack --ctstate INVALID -j ufw-logging-deny",
+        "-A ufw-before-input -m conntrack --ctstate INVALID -j DROP",
+        "-A ufw-before-input -p icmp -m icmp --icmp-type 3 -j ACCEPT",
+        "-A ufw-before-input -p icmp -m icmp --icmp-type 11 -j ACCEPT",
+        "-A ufw-before-input -p icmp -m icmp --icmp-type 12 -j ACCEPT",
+        "-A ufw-before-input -p icmp -m icmp --icmp-type 8 -j ACCEPT",
+        "-A ufw-before-input -p udp -m udp --sport 67 --dport 68 -j ACCEPT",
+        "-A ufw-before-input -j ufw-not-local",
+        "-A ufw-before-input -d 224.0.0.251/32 -p udp -m udp --dport 5353 -j ACCEPT",
+        "-A ufw-before-input -d 239.255.255.250/32 -p udp -m udp --dport 1900 -j ACCEPT",
+        "-A ufw-before-input -j ufw-user-input",
+        "-A ufw-before-output -o lo -j ACCEPT",
+        "-A ufw-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+        "-A ufw-before-output -j ufw-user-output",
+        "-A ufw-logging-allow -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW ALLOW] \"",
+        "-A ufw-logging-deny -m conntrack --ctstate INVALID -m limit --limit 3/min --limit-burst 10 -j RETURN",
+        "-A ufw-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"",
+        "-A ufw-not-local -m addrtype --dst-type LOCAL -j RETURN",
+        "-A ufw-not-local -m addrtype --dst-type MULTICAST -j RETURN",
+        "-A ufw-not-local -m addrtype --dst-type BROADCAST -j RETURN",
+        "-A ufw-not-local -m limit --limit 3/min --limit-burst 10 -j ufw-logging-deny",
+        "-A ufw-not-local -j DROP",
+        "-A ufw-skip-to-policy-forward -j DROP",
+        "-A ufw-skip-to-policy-input -j DROP",
+        "-A ufw-skip-to-policy-output -j ACCEPT",
+        "-A ufw-track-output -p tcp -m conntrack --ctstate NEW -j ACCEPT",
+        "-A ufw-track-output -p udp -m conntrack --ctstate NEW -j ACCEPT",
+        "-A ufw-user-limit -m limit --limit 3/min -j LOG --log-prefix \"[UFW LIMIT BLOCK] \"",
+        "-A ufw-user-limit -j REJECT --reject-with icmp-port-unreachable",
+        "-A ufw-user-limit-accept -j ACCEPT"
+      ],
+      "chains": [
+        [
+          "INPUT",
+          "DROP"
+        ],
+        [
+          "FORWARD",
+          "DROP"
+        ],
+        [
+          "OUTPUT",
+          "ACCEPT"
+        ],
+        [
+          "ufw-after-forward",
+          "-"
+        ],
+        [
+          "ufw-after-input",
+          "-"
+        ],
+        [
+          "ufw-after-logging-forward",
+          "-"
+        ],
+        [
+          "ufw-after-logging-input",
+          "-"
+        ],
+        [
+          "ufw-after-logging-output",
+          "-"
+        ],
+        [
+          "ufw-after-output",
+          "-"
+        ],
+        [
+          "ufw-before-forward",
+          "-"
+        ],
+        [
+          "ufw-before-input",
+          "-"
+        ],
+        [
+          "ufw-before-logging-forward",
+          "-"
+        ],
+        [
+          "ufw-before-logging-input",
+          "-"
+        ],
+        [
+          "ufw-before-logging-output",
+          "-"
+        ],
+        [
+          "ufw-before-output",
+          "-"
+        ],
+        [
+          "ufw-logging-allow",
+          "-"
+        ],
+        [
+          "ufw-logging-deny",
+          "-"
+        ],
+        [
+          "ufw-not-local",
+          "-"
+        ],
+        [
+          "ufw-reject-forward",
+          "-"
+        ],
+        [
+          "ufw-reject-input",
+          "-"
+        ],
+        [
+          "ufw-reject-output",
+          "-"
+        ],
+        [
+          "ufw-skip-to-policy-forward",
+          "-"
+        ],
+        [
+          "ufw-skip-to-policy-input",
+          "-"
+        ],
+        [
+          "ufw-skip-to-policy-output",
+          "-"
+        ],
+        [
+          "ufw-track-forward",
+          "-"
+        ],
+        [
+          "ufw-track-input",
+          "-"
+        ],
+        [
+          "ufw-track-output",
+          "-"
+        ],
+        [
+          "ufw-user-forward",
+          "-"
+        ],
+        [
+          "ufw-user-input",
+          "-"
+        ],
+        [
+          "ufw-user-limit",
+          "-"
+        ],
+        [
+          "ufw-user-limit-accept",
+          "-"
+        ],
+        [
+          "ufw-user-logging-forward",
+          "-"
+        ],
+        [
+          "ufw-user-logging-input",
+          "-"
+        ],
+        [
+          "ufw-user-logging-output",
+          "-"
+        ],
+        [
+          "ufw-user-output",
+          "-"
+        ]
+      ],
+      "native_rule_map": {
+        "-A FORWARD -j ufw-after-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-after-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw-after-logging-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-after-logging-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw-before-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-before-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw-before-logging-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-before-logging-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw-reject-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-reject-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw-track-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-track-forward"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw-after-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-after-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw-after-logging-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-after-logging-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw-before-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-before-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw-before-logging-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-before-logging-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw-reject-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-reject-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw-track-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-track-input"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw-after-logging-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-after-logging-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw-after-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-after-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw-before-logging-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-before-logging-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw-before-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-before-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw-reject-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-reject-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw-track-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-track-output"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-input -m addrtype --dst-type BROADCAST -j ufw-skip-to-policy-input": {
+          "expr": [
+            {
+              "xt": {
+                "name": "addrtype",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-input -p tcp -m tcp --dport 139 -j ufw-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 139
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-input -p tcp -m tcp --dport 445 -j ufw-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 445
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-input -p udp -m udp --dport 137 -j ufw-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 137
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-input -p udp -m udp --dport 138 -j ufw-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 138
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-input -p udp -m udp --dport 67 -j ufw-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 67
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-input -p udp -m udp --dport 68 -j ufw-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 68
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-logging-forward -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw-after-logging-input -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw-before-forward -j ufw-user-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-user-forward"
+              }
+            }
+          ]
+        },
+        "-A ufw-before-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-forward -p icmp -m icmp --icmp-type 11 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-forward -p icmp -m icmp --icmp-type 12 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-forward -p icmp -m icmp --icmp-type 3 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-forward -p icmp -m icmp --icmp-type 8 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -d 224.0.0.251/32 -p udp -m udp --dport 5353 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "224.0.0.251"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 5353
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -d 239.255.255.250/32 -p udp -m udp --dport 1900 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "239.255.255.250"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 1900
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -i lo -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "lo"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -j ufw-not-local": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-not-local"
+              }
+            }
+          ]
+        },
+        "-A ufw-before-input -j ufw-user-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-user-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-before-input -m conntrack --ctstate INVALID -j DROP": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw-before-input -m conntrack --ctstate INVALID -j ufw-logging-deny": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-logging-deny"
+              }
+            }
+          ]
+        },
+        "-A ufw-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -p icmp -m icmp --icmp-type 11 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -p icmp -m icmp --icmp-type 12 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -p icmp -m icmp --icmp-type 3 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -p icmp -m icmp --icmp-type 8 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-input -p udp -m udp --sport 67 --dport 68 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "sport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 67
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 68
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-output -j ufw-user-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-user-output"
+              }
+            }
+          ]
+        },
+        "-A ufw-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-before-output -o lo -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "lo"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-logging-allow -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW ALLOW] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw-logging-deny -m conntrack --ctstate INVALID -m limit --limit 3/min --limit-burst 10 -j RETURN": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ]
+        },
+        "-A ufw-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw-not-local -j DROP": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw-not-local -m addrtype --dst-type BROADCAST -j RETURN": {
+          "expr": [
+            {
+              "xt": {
+                "name": "addrtype",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ]
+        },
+        "-A ufw-not-local -m addrtype --dst-type LOCAL -j RETURN": {
+          "expr": [
+            {
+              "xt": {
+                "name": "addrtype",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ]
+        },
+        "-A ufw-not-local -m addrtype --dst-type MULTICAST -j RETURN": {
+          "expr": [
+            {
+              "xt": {
+                "name": "addrtype",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ]
+        },
+        "-A ufw-not-local -m limit --limit 3/min --limit-burst 10 -j ufw-logging-deny": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-logging-deny"
+              }
+            }
+          ]
+        },
+        "-A ufw-skip-to-policy-forward -j DROP": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw-skip-to-policy-input -j DROP": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw-skip-to-policy-output -j ACCEPT": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-track-output -p tcp -m conntrack --ctstate NEW -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "tcp"
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-track-output -p udp -m conntrack --ctstate NEW -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "udp"
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-forward -s 198.51.100.0/24 -d 203.0.113.0/24 -i eth0 -o eth1 -p tcp -m tcp --dport 8080 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "198.51.100.0",
+                    "len": 24
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "203.0.113.0",
+                    "len": 24
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "eth0"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "eth1"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 8080
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-input -i lo -p udp -m udp --dport 5353 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "lo"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 5353
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-input -p tcp -m tcp --dport 22 -j ufw-user-limit-accept": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 22
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-user-limit-accept"
+              }
+            }
+          ]
+        },
+        "-A ufw-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name DEFAULT --mask 255.255.255.255 --rsource": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 22
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "recent",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            }
+          ]
+        },
+        "-A ufw-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 --name DEFAULT --mask 255.255.255.255 --rsource -j ufw-user-limit": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 22
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "recent",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-user-limit"
+              }
+            }
+          ]
+        },
+        "-A ufw-user-input -p tcp -m tcp --dport 8081 -m comment --comment \"\\'dapp_CloudFront%20Fixture%20App\\'\" -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 8081
+              }
+            },
+            {
+              "xt": {
+                "name": "comment",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-input -s 192.0.2.0/28 -p tcp -m tcp --dport 443 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "192.0.2.0",
+                    "len": 28
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 443
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-input -s 198.51.100.0/24 -p tcp -m tcp --dport 8443 -j DROP": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "198.51.100.0",
+                    "len": 24
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 8443
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw-user-input -s 198.51.100.0/24 -p udp -m udp --dport 9443 -j REJECT --reject-with icmp-port-unreachable": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "198.51.100.0",
+                    "len": 24
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 9443
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "REJECT",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw-user-input -s 203.0.113.0/24 -p tcp -m multiport --dports 80,443 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "203.0.113.0",
+                    "len": 24
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "tcp"
+              }
+            },
+            {
+              "xt": {
+                "name": "multiport",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-input -s 203.0.113.0/24 -p tcp -m multiport --dports 80,443 -j ufw-user-logging-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "203.0.113.0",
+                    "len": 24
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "tcp"
+              }
+            },
+            {
+              "xt": {
+                "name": "multiport",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw-user-logging-input"
+              }
+            }
+          ]
+        },
+        "-A ufw-user-input -s 203.0.113.8/32 -p tcp -m tcp --dport 22 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "203.0.113.8"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 22
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-input -s 203.0.113.99/32 -p tcp -m tcp --dport 9000 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "203.0.113.99"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 9000
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-limit -j REJECT --reject-with icmp-port-unreachable": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "REJECT",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw-user-limit -m limit --limit 3/min -j LOG --log-prefix \"[UFW LIMIT BLOCK] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 5,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw-user-limit-accept -j ACCEPT": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw-user-logging-input -s 203.0.113.0/24 -p tcp -m multiport --dports 80,443 -j RETURN": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "203.0.113.0",
+                    "len": 24
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "tcp"
+              }
+            },
+            {
+              "xt": {
+                "name": "multiport",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ]
+        },
+        "-A ufw-user-logging-input -s 203.0.113.0/24 -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW ALLOW] \"": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "203.0.113.0",
+                    "len": 24
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": "tcp"
+              }
+            },
+            {
+              "xt": {
+                "name": "multiport",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw-user-output -o eth0 -p udp -m udp --dport 53 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "eth0"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 53
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        }
+      },
+      "raw_rule_map": {
+        "-A ufw-user-forward -i eth0 -o eth1 -p tcp -d 203.0.113.0/24 --dport 8080 -s 198.51.100.0/24 -j ACCEPT": "-A ufw-user-forward -s 198.51.100.0/24 -d 203.0.113.0/24 -i eth0 -o eth1 -p tcp -m tcp --dport 8080 -j ACCEPT",
+        "-A ufw-user-input -i lo -p udp --dport 5353 -j ACCEPT": "-A ufw-user-input -i lo -p udp -m udp --dport 5353 -j ACCEPT",
+        "-A ufw-user-input -p tcp --dport 22 -j ufw-user-limit-accept": "-A ufw-user-input -p tcp -m tcp --dport 22 -j ufw-user-limit-accept",
+        "-A ufw-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set": "-A ufw-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name DEFAULT --mask 255.255.255.255 --rsource",
+        "-A ufw-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 -j ufw-user-limit": "-A ufw-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 --name DEFAULT --mask 255.255.255.255 --rsource -j ufw-user-limit",
+        "-A ufw-user-input -p tcp --dport 22 -s 203.0.113.8 -j ACCEPT": "-A ufw-user-input -s 203.0.113.8/32 -p tcp -m tcp --dport 22 -j ACCEPT",
+        "-A ufw-user-input -p tcp --dport 443 -s 192.0.2.0/28 -j ACCEPT": "-A ufw-user-input -s 192.0.2.0/28 -p tcp -m tcp --dport 443 -j ACCEPT",
+        "-A ufw-user-input -p tcp --dport 8081 -j ACCEPT -m comment --comment 'dapp_CloudFront%20Fixture%20App'": "-A ufw-user-input -p tcp -m tcp --dport 8081 -m comment --comment \"\\'dapp_CloudFront%20Fixture%20App\\'\" -j ACCEPT",
+        "-A ufw-user-input -p tcp --dport 8443 -s 198.51.100.0/24 -j DROP": "-A ufw-user-input -s 198.51.100.0/24 -p tcp -m tcp --dport 8443 -j DROP",
+        "-A ufw-user-input -p tcp --dport 9000 -s 203.0.113.99 -j ACCEPT": "-A ufw-user-input -s 203.0.113.99/32 -p tcp -m tcp --dport 9000 -j ACCEPT",
+        "-A ufw-user-input -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -j ACCEPT": "-A ufw-user-input -s 203.0.113.0/24 -p tcp -m multiport --dports 80,443 -j ACCEPT",
+        "-A ufw-user-input -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -j ufw-user-logging-input": "-A ufw-user-input -s 203.0.113.0/24 -p tcp -m multiport --dports 80,443 -j ufw-user-logging-input",
+        "-A ufw-user-input -p udp --dport 9443 -s 198.51.100.0/24 -j REJECT": "-A ufw-user-input -s 198.51.100.0/24 -p udp -m udp --dport 9443 -j REJECT --reject-with icmp-port-unreachable",
+        "-A ufw-user-logging-input -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -j RETURN": "-A ufw-user-logging-input -s 203.0.113.0/24 -p tcp -m multiport --dports 80,443 -j RETURN",
+        "-A ufw-user-logging-input -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -m conntrack --ctstate NEW -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW ALLOW] \"": "-A ufw-user-logging-input -s 203.0.113.0/24 -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW ALLOW] \"",
+        "-A ufw-user-output -o eth0 -p udp --dport 53 -j ACCEPT": "-A ufw-user-output -o eth0 -p udp -m udp --dport 53 -j ACCEPT"
+      }
+    },
+    "ip6": {
+      "base_rules": [
+        "-A INPUT -j ufw6-before-logging-input",
+        "-A INPUT -j ufw6-before-input",
+        "-A INPUT -j ufw6-after-input",
+        "-A INPUT -j ufw6-after-logging-input",
+        "-A INPUT -j ufw6-reject-input",
+        "-A INPUT -j ufw6-track-input",
+        "-A FORWARD -j ufw6-before-logging-forward",
+        "-A FORWARD -j ufw6-before-forward",
+        "-A FORWARD -j ufw6-after-forward",
+        "-A FORWARD -j ufw6-after-logging-forward",
+        "-A FORWARD -j ufw6-reject-forward",
+        "-A FORWARD -j ufw6-track-forward",
+        "-A OUTPUT -j ufw6-before-logging-output",
+        "-A OUTPUT -j ufw6-before-output",
+        "-A OUTPUT -j ufw6-after-output",
+        "-A OUTPUT -j ufw6-after-logging-output",
+        "-A OUTPUT -j ufw6-reject-output",
+        "-A OUTPUT -j ufw6-track-output",
+        "-A ufw6-after-input -p udp -m udp --dport 137 -j ufw6-skip-to-policy-input",
+        "-A ufw6-after-input -p udp -m udp --dport 138 -j ufw6-skip-to-policy-input",
+        "-A ufw6-after-input -p tcp -m tcp --dport 139 -j ufw6-skip-to-policy-input",
+        "-A ufw6-after-input -p tcp -m tcp --dport 445 -j ufw6-skip-to-policy-input",
+        "-A ufw6-after-input -p udp -m udp --dport 546 -j ufw6-skip-to-policy-input",
+        "-A ufw6-after-input -p udp -m udp --dport 547 -j ufw6-skip-to-policy-input",
+        "-A ufw6-after-logging-forward -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"",
+        "-A ufw6-after-logging-input -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"",
+        "-A ufw6-before-forward -m rt --rt-type 0 -j DROP",
+        "-A ufw6-before-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 1 -j ACCEPT",
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 2 -j ACCEPT",
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 3 -j ACCEPT",
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 4 -j ACCEPT",
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 128 -j ACCEPT",
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 129 -j ACCEPT",
+        "-A ufw6-before-forward -j ufw6-user-forward",
+        "-A ufw6-before-input -i lo -j ACCEPT",
+        "-A ufw6-before-input -m rt --rt-type 0 -j DROP",
+        "-A ufw6-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 129 -j ACCEPT",
+        "-A ufw6-before-input -m conntrack --ctstate INVALID -j ufw6-logging-deny",
+        "-A ufw6-before-input -m conntrack --ctstate INVALID -j DROP",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 1 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 2 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 3 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 4 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 128 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 133 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 141 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 142 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT",
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 131 -j ACCEPT",
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 132 -j ACCEPT",
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 143 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 148 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 149 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 151 -m hl --hl-eq 1 -j ACCEPT",
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 152 -m hl --hl-eq 1 -j ACCEPT",
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 153 -m hl --hl-eq 1 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 144 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 145 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 146 -j ACCEPT",
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 147 -j ACCEPT",
+        "-A ufw6-before-input -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -j ACCEPT",
+        "-A ufw6-before-input -d ff02::fb/128 -p udp -m udp --dport 5353 -j ACCEPT",
+        "-A ufw6-before-input -d ff02::f/128 -p udp -m udp --dport 1900 -j ACCEPT",
+        "-A ufw6-before-input -j ufw6-user-input",
+        "-A ufw6-before-output -o lo -j ACCEPT",
+        "-A ufw6-before-output -m rt --rt-type 0 -j DROP",
+        "-A ufw6-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 1 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 2 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 3 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 4 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 128 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 129 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 133 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 141 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 142 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT",
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 131 -j ACCEPT",
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 132 -j ACCEPT",
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 143 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 148 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 149 -m hl --hl-eq 255 -j ACCEPT",
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 151 -m hl --hl-eq 1 -j ACCEPT",
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 152 -m hl --hl-eq 1 -j ACCEPT",
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 153 -m hl --hl-eq 1 -j ACCEPT",
+        "-A ufw6-before-output -j ufw6-user-output",
+        "-A ufw6-logging-allow -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW ALLOW] \"",
+        "-A ufw6-logging-deny -m conntrack --ctstate INVALID -m limit --limit 3/min --limit-burst 10 -j RETURN",
+        "-A ufw6-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"",
+        "-A ufw6-skip-to-policy-forward -j DROP",
+        "-A ufw6-skip-to-policy-input -j DROP",
+        "-A ufw6-skip-to-policy-output -j ACCEPT",
+        "-A ufw6-track-output -p tcp -m conntrack --ctstate NEW -j ACCEPT",
+        "-A ufw6-track-output -p udp -m conntrack --ctstate NEW -j ACCEPT",
+        "-A ufw6-user-limit -m limit --limit 3/min -j LOG --log-prefix \"[UFW LIMIT BLOCK] \"",
+        "-A ufw6-user-limit -j REJECT --reject-with icmp6-port-unreachable",
+        "-A ufw6-user-limit-accept -j ACCEPT"
+      ],
+      "chains": [
+        [
+          "INPUT",
+          "DROP"
+        ],
+        [
+          "FORWARD",
+          "DROP"
+        ],
+        [
+          "OUTPUT",
+          "ACCEPT"
+        ],
+        [
+          "ufw6-after-forward",
+          "-"
+        ],
+        [
+          "ufw6-after-input",
+          "-"
+        ],
+        [
+          "ufw6-after-logging-forward",
+          "-"
+        ],
+        [
+          "ufw6-after-logging-input",
+          "-"
+        ],
+        [
+          "ufw6-after-logging-output",
+          "-"
+        ],
+        [
+          "ufw6-after-output",
+          "-"
+        ],
+        [
+          "ufw6-before-forward",
+          "-"
+        ],
+        [
+          "ufw6-before-input",
+          "-"
+        ],
+        [
+          "ufw6-before-logging-forward",
+          "-"
+        ],
+        [
+          "ufw6-before-logging-input",
+          "-"
+        ],
+        [
+          "ufw6-before-logging-output",
+          "-"
+        ],
+        [
+          "ufw6-before-output",
+          "-"
+        ],
+        [
+          "ufw6-logging-allow",
+          "-"
+        ],
+        [
+          "ufw6-logging-deny",
+          "-"
+        ],
+        [
+          "ufw6-reject-forward",
+          "-"
+        ],
+        [
+          "ufw6-reject-input",
+          "-"
+        ],
+        [
+          "ufw6-reject-output",
+          "-"
+        ],
+        [
+          "ufw6-skip-to-policy-forward",
+          "-"
+        ],
+        [
+          "ufw6-skip-to-policy-input",
+          "-"
+        ],
+        [
+          "ufw6-skip-to-policy-output",
+          "-"
+        ],
+        [
+          "ufw6-track-forward",
+          "-"
+        ],
+        [
+          "ufw6-track-input",
+          "-"
+        ],
+        [
+          "ufw6-track-output",
+          "-"
+        ],
+        [
+          "ufw6-user-forward",
+          "-"
+        ],
+        [
+          "ufw6-user-input",
+          "-"
+        ],
+        [
+          "ufw6-user-limit",
+          "-"
+        ],
+        [
+          "ufw6-user-limit-accept",
+          "-"
+        ],
+        [
+          "ufw6-user-logging-forward",
+          "-"
+        ],
+        [
+          "ufw6-user-logging-input",
+          "-"
+        ],
+        [
+          "ufw6-user-logging-output",
+          "-"
+        ],
+        [
+          "ufw6-user-output",
+          "-"
+        ]
+      ],
+      "native_rule_map": {
+        "-A FORWARD -j ufw6-after-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-after-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw6-after-logging-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-after-logging-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw6-before-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-before-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw6-before-logging-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-before-logging-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw6-reject-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-reject-forward"
+              }
+            }
+          ]
+        },
+        "-A FORWARD -j ufw6-track-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-track-forward"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw6-after-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-after-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw6-after-logging-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-after-logging-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw6-before-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-before-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw6-before-logging-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-before-logging-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw6-reject-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-reject-input"
+              }
+            }
+          ]
+        },
+        "-A INPUT -j ufw6-track-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-track-input"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw6-after-logging-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-after-logging-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw6-after-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-after-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw6-before-logging-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-before-logging-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw6-before-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-before-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw6-reject-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-reject-output"
+              }
+            }
+          ]
+        },
+        "-A OUTPUT -j ufw6-track-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-track-output"
+              }
+            }
+          ]
+        },
+        "-A ufw6-after-input -p tcp -m tcp --dport 139 -j ufw6-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 139
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw6-after-input -p tcp -m tcp --dport 445 -j ufw6-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 445
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw6-after-input -p udp -m udp --dport 137 -j ufw6-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 137
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw6-after-input -p udp -m udp --dport 138 -j ufw6-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 138
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw6-after-input -p udp -m udp --dport 546 -j ufw6-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 546
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw6-after-input -p udp -m udp --dport 547 -j ufw6-skip-to-policy-input": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 547
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-skip-to-policy-input"
+              }
+            }
+          ]
+        },
+        "-A ufw6-after-logging-forward -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw6-after-logging-input -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw6-before-forward -j ufw6-user-forward": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-user-forward"
+              }
+            }
+          ]
+        },
+        "-A ufw6-before-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-forward -m rt --rt-type 0 -j DROP": {
+          "expr": [
+            {
+              "xt": {
+                "name": "rt",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 128 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 129 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 2 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 3 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-forward -p ipv6-icmp -m icmp6 --icmpv6-type 4 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -d ff02::f/128 -p udp -m udp --dport 1900 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": "ff02::f"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 1900
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -d ff02::fb/128 -p udp -m udp --dport 5353 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": "ff02::fb"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 5353
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -i lo -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "lo"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -j ufw6-user-input": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-user-input"
+              }
+            }
+          ]
+        },
+        "-A ufw6-before-input -m conntrack --ctstate INVALID -j DROP": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -m conntrack --ctstate INVALID -j ufw6-logging-deny": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-logging-deny"
+              }
+            }
+          ]
+        },
+        "-A ufw6-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -m rt --rt-type 0 -j DROP": {
+          "expr": [
+            {
+              "xt": {
+                "name": "rt",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 128 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 129 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 133 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 141 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 142 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 144 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 145 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 146 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 147 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 148 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 149 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 2 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 3 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -p ipv6-icmp -m icmp6 --icmpv6-type 4 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -s fe80::/10 -d fe80::/10 -p udp -m udp --sport 547 --dport 546 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "daddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "sport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 547
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 546
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 131 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 132 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 143 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 151 -m hl --hl-eq 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 152 -m hl --hl-eq 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-input -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 153 -m hl --hl-eq 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -j ufw6-user-output": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-user-output"
+              }
+            }
+          ]
+        },
+        "-A ufw6-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -m rt --rt-type 0 -j DROP": {
+          "expr": [
+            {
+              "xt": {
+                "name": "rt",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -o lo -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "lo"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 128 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 129 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 133 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 134 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 135 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 136 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 141 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 142 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 148 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 149 -m hl --hl-eq 255 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 2 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 3 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -p ipv6-icmp -m icmp6 --icmpv6-type 4 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 130 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 131 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 132 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 143 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 151 -m hl --hl-eq 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 152 -m hl --hl-eq 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-before-output -s fe80::/10 -p ipv6-icmp -m icmp6 --icmpv6-type 153 -m hl --hl-eq 1 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "ipv6-icmp"
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "hl",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-logging-allow -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW ALLOW] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw6-logging-deny -m conntrack --ctstate INVALID -m limit --limit 3/min --limit-burst 10 -j RETURN": {
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ]
+        },
+        "-A ufw6-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix \"[UFW BLOCK] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 10,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw6-skip-to-policy-forward -j DROP": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw6-skip-to-policy-input -j DROP": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ]
+        },
+        "-A ufw6-skip-to-policy-output -j ACCEPT": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-track-output -p tcp -m conntrack --ctstate NEW -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "tcp"
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-track-output -p udp -m conntrack --ctstate NEW -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": "udp"
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-user-input -i lo -p udp -m udp --dport 5353 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "lo"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 5353
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-user-input -p tcp -m tcp --dport 22 -j ufw6-user-limit-accept": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 22
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-user-limit-accept"
+              }
+            }
+          ]
+        },
+        "-A ufw6-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name DEFAULT --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 22
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "recent",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            }
+          ]
+        },
+        "-A ufw6-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 --name DEFAULT --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource -j ufw6-user-limit": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 22
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "recent",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "ufw6-user-limit"
+              }
+            }
+          ]
+        },
+        "-A ufw6-user-input -p tcp -m tcp --dport 8081 -m comment --comment \"\\'dapp_CloudFront%20Fixture%20App\\'\" -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 8081
+              }
+            },
+            {
+              "xt": {
+                "name": "comment",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-user-input -s 2001:db8:1::/64 -p tcp -m tcp --dport 8443 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "2001:db8:1::",
+                    "len": 64
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 8443
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-user-input -s 2001:db8:cf::/64 -p tcp -m tcp --dport 443 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "2001:db8:cf::",
+                    "len": 64
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 443
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-user-limit -j REJECT --reject-with icmp6-port-unreachable": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "REJECT",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw6-user-limit -m limit --limit 3/min -j LOG --log-prefix \"[UFW LIMIT BLOCK] \"": {
+          "expr": [
+            {
+              "limit": {
+                "burst": 5,
+                "per": "minute",
+                "rate": 3
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "LOG",
+                "type": "target"
+              }
+            }
+          ]
+        },
+        "-A ufw6-user-limit-accept -j ACCEPT": {
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        },
+        "-A ufw6-user-output -o eth0 -p udp -m udp --dport 53 -j ACCEPT": {
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "eth0"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "udp"
+                  }
+                },
+                "op": "==",
+                "right": 53
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ]
+        }
+      },
+      "raw_rule_map": {
+        "-A ufw6-user-input -i lo -p udp --dport 5353 -j ACCEPT": "-A ufw6-user-input -i lo -p udp -m udp --dport 5353 -j ACCEPT",
+        "-A ufw6-user-input -p tcp --dport 22 -j ufw6-user-limit-accept": "-A ufw6-user-input -p tcp -m tcp --dport 22 -j ufw6-user-limit-accept",
+        "-A ufw6-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set": "-A ufw6-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --set --name DEFAULT --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource",
+        "-A ufw6-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 -j ufw6-user-limit": "-A ufw6-user-input -p tcp -m tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 --name DEFAULT --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource -j ufw6-user-limit",
+        "-A ufw6-user-input -p tcp --dport 443 -s 2001:db8:cf::/64 -j ACCEPT": "-A ufw6-user-input -s 2001:db8:cf::/64 -p tcp -m tcp --dport 443 -j ACCEPT",
+        "-A ufw6-user-input -p tcp --dport 8081 -j ACCEPT -m comment --comment 'dapp_CloudFront%20Fixture%20App'": "-A ufw6-user-input -p tcp -m tcp --dport 8081 -m comment --comment \"\\'dapp_CloudFront%20Fixture%20App\\'\" -j ACCEPT",
+        "-A ufw6-user-input -p tcp --dport 8443 -s 2001:db8:1::/64 -j ACCEPT": "-A ufw6-user-input -s 2001:db8:1::/64 -p tcp -m tcp --dport 8443 -j ACCEPT",
+        "-A ufw6-user-output -o eth0 -p udp --dport 53 -j ACCEPT": "-A ufw6-user-output -o eth0 -p udp -m udp --dport 53 -j ACCEPT"
+      }
+    }
+  },
+  "os": "24.04",
+  "source_manifest_sha256": "a3e146838471ea434661fda622530f1631e8b5f2c58b99b3a78f6e89b11e0954",
+  "stock_raw_sha256": {
+    "after.rules": "c1be61c17e850ea16dc5a02be22e0ec79b631904c2383353da360bce2dfc6b64",
+    "after6.rules": "ee5f2e14d2ae6c33ffac9614dfc6035f33a1faae94542751738f26b2859e3e13",
+    "before.rules": "d63bc8bb2df0d20909267b7b40cb5cc187baba6e0baf95bbf71ac14f92df8e6c",
+    "before6.rules": "e31099b46c2ae40afa92e90dbe5d575c438327e1a4374355872f5eb37db3307b"
+  },
+  "version": 1
+}

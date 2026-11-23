@@ -1,5 +1,14 @@
 ---
-- name: Install CloudFront synchronization in plan-only mode
+# Stage S0: the role still sends the pre-C4 payload (no `version`), so the
+# installer's validate_candidate rejects it as invalid_candidate_schema at the
+# --validate-only step and main() collapses that to the generic
+# candidate_validation_or_installation_unavailable shown below (the exact
+# schema code is pinned by the role unit test
+# test_role_generated_payload_is_rejected_as_old_candidate_schema). The install
+# step itself is closed as cohort_installer_unavailable even for a valid
+# candidate. The rescue accepts only that exact fixed refusal; any other
+# failure (or an unexpected success) fails the converge.
+- name: Run CloudFront synchronization and require the S0 fail-closed refusal
   hosts: all
   become: true
   gather_facts: true
@@ -7,14 +16,43 @@
     CFSYNC_NGINX_ENABLED: "false"
     CFSYNC_PORTS: "[443]"
     CFSYNC_NGINX_BUNDLES: "[]"
+    cloudfront_sync_s0_install_refusal: '{"error": "candidate_validation_or_installation_unavailable"}'
   tasks:
-    - name: Run the bundled role with a JSON host variable
-      ansible.builtin.include_role:
-        name: cloudfront_sync
-      vars:
-        cloudfront_sync_host_address: "{{ ansible_facts.default_ipv4.address }}"
-        cloudfront_sync_firewall_backend: ufw
-        cloudfront_sync_nginx_enabled: "{{ CFSYNC_NGINX_ENABLED | from_json }}"
-        cloudfront_sync_ports: "{{ CFSYNC_PORTS | from_json }}"
-        cloudfront_sync_nginx_bundles: "{{ CFSYNC_NGINX_BUNDLES | from_json }}"
-        cloudfront_sync_timer_enabled: false
+    - name: Run the bundled role and expect the fixed S0 refusal
+      block:
+        - name: Run the bundled role with a JSON host variable
+          ansible.builtin.include_role:
+            name: cloudfront_sync
+          vars:
+            cloudfront_sync_host_address: "{{ ansible_facts.default_ipv4.address }}"
+            cloudfront_sync_firewall_backend: ufw
+            cloudfront_sync_nginx_enabled: "{{ CFSYNC_NGINX_ENABLED | from_json }}"
+            cloudfront_sync_ports: "{{ CFSYNC_PORTS | from_json }}"
+            cloudfront_sync_nginx_bundles: "{{ CFSYNC_NGINX_BUNDLES | from_json }}"
+            cloudfront_sync_timer_enabled: false
+
+        - name: Fail because S0 must not complete an installation
+          ansible.builtin.fail:
+            msg: cloudfront_sync installed in S0; the runtime actor must not be connected
+
+      rescue:
+        - name: Require exactly the fixed validation refusal
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name is search('Validate inputs and bundled assets before changing the host')
+              - ansible_failed_result.rc == 1
+              - ansible_failed_result.stdout == ''
+              - ansible_failed_result.stderr == cloudfront_sync_s0_install_refusal
+            fail_msg: cloudfront_sync failed for a reason other than the fixed S0 refusal
+
+    - name: Inspect installation targets
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      # Single list shared with s0_refusal_verify.py.
+      loop: "{{ (lookup('ansible.builtin.file', playbook_dir ~ '/install_targets.json') | from_json).install_targets }}"
+      register: cloudfront_sync_s0_targets
+
+    - name: Require that the refused installation left nothing behind
+      ansible.builtin.assert:
+        that:
+          - cloudfront_sync_s0_targets.results | selectattr('stat.exists') | list | length == 0

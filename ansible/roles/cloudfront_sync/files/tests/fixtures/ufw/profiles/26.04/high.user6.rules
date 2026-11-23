@@ -1,0 +1,53 @@
+*filter
+:ufw6-user-input - [0:0]
+:ufw6-user-output - [0:0]
+:ufw6-user-forward - [0:0]
+:ufw6-before-logging-input - [0:0]
+:ufw6-before-logging-output - [0:0]
+:ufw6-before-logging-forward - [0:0]
+:ufw6-user-logging-input - [0:0]
+:ufw6-user-logging-output - [0:0]
+:ufw6-user-logging-forward - [0:0]
+:ufw6-after-logging-input - [0:0]
+:ufw6-after-logging-output - [0:0]
+:ufw6-after-logging-forward - [0:0]
+:ufw6-logging-deny - [0:0]
+:ufw6-logging-allow - [0:0]
+:ufw6-user-limit - [0:0]
+:ufw6-user-limit-accept - [0:0]
+### RULES ###
+
+### tuple ### allow udp 9087 ::/0 any 2001:db8:12::1 in comment=666978747572652d686f7374313238
+-A ufw6-user-input -p udp --dport 9087 -s 2001:db8:12::1 -j ACCEPT
+
+### tuple ### allow tcp 8086,8087 ::/0 any ::/0 CloudFront%20Multi%20App - in
+-A ufw6-user-input -p tcp -m multiport --dports 8086,8087 -j ACCEPT -m comment --comment 'dapp_CloudFront%20Multi%20App'
+
+### tuple ### allow udp 5354 ::/0 any ::/0 CloudFront%20Multi%20App - in
+-A ufw6-user-input -p udp --dport 5354 -j ACCEPT -m comment --comment 'dapp_CloudFront%20Multi%20App'
+
+### tuple ### limit tcp 22 ::/0 any ::/0 in comment=666978747572652d7373682d6c696d6974
+-A ufw6-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set
+-A ufw6-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 -j ufw6-user-limit
+-A ufw6-user-input -p tcp --dport 22 -j ufw6-user-limit-accept
+
+### END RULES ###
+
+### LOGGING ###
+-A ufw6-after-logging-input -j LOG --log-prefix "[UFW BLOCK] "
+-A ufw6-after-logging-output -j LOG --log-prefix "[UFW ALLOW] "
+-A ufw6-after-logging-forward -j LOG --log-prefix "[UFW BLOCK] "
+-A ufw6-logging-deny -m conntrack --ctstate INVALID -j LOG --log-prefix "[UFW AUDIT INVALID] "
+-A ufw6-logging-deny -j LOG --log-prefix "[UFW BLOCK] "
+-A ufw6-logging-allow -j LOG --log-prefix "[UFW ALLOW] "
+-I ufw6-before-logging-input -j LOG --log-prefix "[UFW AUDIT] " -m limit --limit 3/min --limit-burst 10
+-I ufw6-before-logging-output -j LOG --log-prefix "[UFW AUDIT] " -m limit --limit 3/min --limit-burst 10
+-I ufw6-before-logging-forward -j LOG --log-prefix "[UFW AUDIT] " -m limit --limit 3/min --limit-burst 10
+### END LOGGING ###
+
+### RATE LIMITING ###
+-A ufw6-user-limit -m limit --limit 3/minute -j LOG --log-prefix "[UFW LIMIT BLOCK] "
+-A ufw6-user-limit -j REJECT
+-A ufw6-user-limit-accept -j ACCEPT
+### END RATE LIMITING ###
+COMMIT

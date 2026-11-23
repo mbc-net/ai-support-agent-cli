@@ -1,95 +1,332 @@
 #!/usr/bin/env python3
 """Synchronize CloudFront origin-facing ranges without owning other host policy.
 
-The CLI is intentionally root-only and uses fixed state/lock paths. Tests inject a
-host adapter and temporary storage; production has no alternate URL or command
-configuration. Neither subprocess output nor nginx configuration is logged.
+The CLI is intentionally root-only and uses fixed state/lock paths. Only the
+read-only commands (verify-cohort, inspect-state, inspect-runtime) run in
+stage S0; no host actor exists. Usage is printed (exit 0) only when the whole
+argv is -h or --help. Every other outcome below prints one fixed JSON code
+on stderr with empty stdout (argv is never echoed); the first case that
+matches decides.
+  exit 1 runtime_actor_not_connected: a token equals any other known command
+  name, in any position, whatever the other arguments (including -h/--help);
+  refused before anything is parsed.
+  exit 2 unknown_command: no token is a command name of either kind (unknown
+  or missing subcommand), even with -h/--help unless it is the whole argv.
+  exit 2 invalid_arguments: an argument error of a read-only command
+  (unknown option, extra argument, --lock-fd not a non-negative decimal
+  integer of at most 10 digits, any -h/--help).
+  exit 1 sync_failed: a read-only command failed (not root, other config
+  path, lock absent or held, --lock-fd not an open descriptor of the lock
+  file, bundle, config, state).
+Production has no alternate URL or command configuration. Nginx
+configuration is never logged.
 """
+BUNDLE_GENERATION_ID = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# BEGIN FIXED BUNDLE ENTRY STUB
+import hashlib as _bg_hashlib
+import json as _bg_json
+import math as _bg_math
+import os as _bg_os
+from pathlib import Path as _BgPath
+import re as _bg_re
+import stat as _bg_stat
+import sys as _bg_sys
+from types import ModuleType as _BgModule
+
+_BG_ENTRIES = ('cloudfront-sync.py', 'cloudfront-integrity-guard.py', 'install_cloudfront_sync.py')
+_BG_HELPERS = ('ufw_integrity', 'ufw_kernel', 'ufw_kernel_mapping', 'ufw_docker_kernel', 'ufw_docker_transition', 'ufw_observation', 'nginx_observation', 'cloudfront_snapshot')
+_BG_BOOTS = ('bundle_manifest.py', 'bundled_source.py')
+_BG_PROFILES = ('ufw_kernel_profile_22.json', 'ufw_kernel_profile_24.json', 'ufw_kernel_profile_26.json')
+_BG_NAMES = tuple(sorted((*_BG_ENTRIES, *_BG_BOOTS, *(name+'.py' for name in _BG_HELPERS), *_BG_PROFILES)))
+_BG_DIRECTORY = _BgPath('/usr/local/libexec/cloudfront-sync')
+_BG_BOOT_MODULES = ('_cloudfront_bundle_manifest', '_cloudfront_bundle_source')
+_BG_TOTAL = 8 * 1024 * 1024
+_BUNDLE_RUNTIME = None
+
+
+class BundleEntryError(ValueError):
+    """Fixed failure codes, never source/config/subprocess content."""
+
+
+def _bg_sha(raw):
+    return _bg_hashlib.sha256(raw).hexdigest()
+
+
+def _bg_hex(value):
+    return type(value) is str and _bg_re.fullmatch('[0-9a-f]{64}', value) is not None
+
+
+def _bg_canonical(value):
+    return _bg_json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')
+
+
+def _bg_json_bytes(raw, limit, *, integers_only=True):
+    if type(raw) is not bytes or not 0 < len(raw) <= limit:
+        raise BundleEntryError('bundle_json_budget')
+    def pairs(rows):
+        result = {}
+        for key, value in rows:
+            if key in result:
+                raise BundleEntryError('bundle_duplicate_key')
+            result[key] = value
+        return result
+    def invalid(unused):
+        raise BundleEntryError('bundle_noninteger_number')
+    def number(text):
+        value=float(text)
+        if not _bg_math.isfinite(value):
+            raise BundleEntryError('bundle_nonfinite_number')
+        return value
+    def integer(text):
+        if len(text) > 20:
+            raise BundleEntryError('bundle_integer_budget')
+        return int(text)
+    try:
+        value = _bg_json.loads(raw.decode('utf-8'), object_pairs_hook=pairs,
+                              parse_float=invalid if integers_only else number,
+                              parse_constant=invalid, parse_int=integer)
+        pending, count = [(value, 0)], 0
+        while pending:
+            item, depth = pending.pop(); count += 1
+            if count > 100000 or depth > 64:
+                raise BundleEntryError('bundle_json_structure_budget')
+            if isinstance(item, dict):pending.extend((part, depth+1) for part in item.values())
+            elif isinstance(item, list):pending.extend((part, depth+1) for part in item)
+        return value
+    except BundleEntryError:
+        raise
+    except Exception:
+        raise BundleEntryError('invalid_bundle_json') from None
+
+
+def _bg_manifest(raw, literal):
+    value = _bg_json_bytes(raw, 64*1024)
+    if (not _bg_hex(literal) or type(value) is not dict
+            or set(value) != {'version','generation_id','inputs','assets'}
+            or type(value['version']) is not int or value['version'] != 1
+            or value['generation_id'] != literal or _bg_canonical(value)+b'\n' != raw):
+        raise BundleEntryError('running_generation_differs')
+    inputs = value['inputs']
+    if (type(inputs) is not dict or set(inputs) != {'version','assets'}
+            or type(inputs['version']) is not int or inputs['version'] != 1
+            or type(inputs['assets']) is not dict or set(inputs['assets']) != set(_BG_NAMES)
+            or type(value['assets']) is not dict or set(value['assets']) != set(_BG_NAMES)):
+        raise BundleEntryError('bundle_fixed_schema')
+    total = 0
+    for name in _BG_NAMES:
+        row, actual = inputs['assets'][name], value['assets'][name]
+        mode = 0o755 if name in _BG_ENTRIES else 0o644
+        kind = 'entry' if name in _BG_ENTRIES else 'json' if name in _BG_PROFILES else 'source'
+        if (type(row) is not dict or set(row) != {'kind','mode','size','source_sha256'}
+                or type(row['kind']) is not str or row['kind'] != kind
+                or type(row['mode']) is not int or row['mode'] != mode
+                or type(row['size']) is not int or not 0 < row['size'] <= 2*1024*1024
+                or not _bg_hex(row['source_sha256']) or type(actual) is not dict
+                or set(actual) != {'mode','size','sha256'} or type(actual['mode']) is not int
+                or actual['mode'] != mode or type(actual['size']) is not int
+                or actual['size'] != row['size'] or not _bg_hex(actual['sha256'])):
+            raise BundleEntryError('bundle_asset_schema')
+        if name not in _BG_ENTRIES and actual['sha256'] != row['source_sha256']:
+            raise BundleEntryError('bootstrap_not_inputs_bound')
+        total += row['size']
+    if total > _BG_TOTAL:
+        raise BundleEntryError('bundle_aggregate_budget')
+    if _bg_sha(_bg_canonical(inputs)) != literal:
+        raise BundleEntryError('bundle_inputs_digest_differs')
+    return value
+
+
+def _bg_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _bg_capture(directory, names, *, owner=0):
+    """Fixed asset reads only. All paths/FDs are NOFOLLOW and metadata checked."""
+    directory = _BgPath(directory)
+    if (not directory.is_absolute() or '..' in directory.parts or type(owner) is not int
+            or not 0 <= owner < 2**32-1 or type(names) is not tuple
+            or (not set(names) <= {*_BG_NAMES, 'bundle-manifest.json'}
+                and not (directory == _BgPath('/etc/cloudfront-sync') and names == ('config.json',)))
+            or len(set(names)) != len(names)):
+        raise BundleEntryError('invalid_bundle_capture')
+    fd = _bg_os.open('/', _bg_os.O_RDONLY | _bg_os.O_DIRECTORY)
+    anchors, sources, total = [], {}, 0
+    try:
+        current = _BgPath('/')
+        for component in directory.parts[1:]:
+            child = _bg_os.open(component, _bg_os.O_RDONLY | _bg_os.O_DIRECTORY | _bg_os.O_NOFOLLOW, dir_fd=fd)
+            _bg_os.close(fd); fd = child; current /= component
+            info = _bg_os.fstat(fd)
+            sticky = current in (_BgPath('/tmp'),_BgPath('/private/tmp')) and info.st_uid == 0 and info.st_mode & _bg_stat.S_ISVTX
+            if info.st_uid not in (0,owner) or (info.st_mode & 0o022 and not sticky):
+                raise BundleEntryError('unsafe_bundle_directory')
+            anchors.append((current,_bg_identity(info)))
+        identities = {}
+        for name in names:
+            before = _bg_os.stat(name, dir_fd=fd, follow_symlinks=False)
+            mode = 0o640 if name == 'config.json' else 0o755 if name in _BG_ENTRIES else 0o644
+            limit = 64*1024 if name in ('bundle-manifest.json','config.json') else 2*1024*1024
+            if (not _bg_stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != owner
+                    or _bg_stat.S_IMODE(before.st_mode) != mode or not 0 < before.st_size <= limit):
+                raise BundleEntryError('unsafe_bundle_asset')
+            leaf = _bg_os.open(name, _bg_os.O_RDONLY | _bg_os.O_NOFOLLOW | _bg_os.O_NONBLOCK | getattr(_bg_os,'O_NOATIME',0), dir_fd=fd)
+            try:
+                if _bg_identity(_bg_os.fstat(leaf)) != _bg_identity(before):
+                    raise BundleEntryError('bundle_changed_during_read')
+                data = bytearray()
+                while True:
+                    part = _bg_os.read(leaf,min(65536,limit+1-len(data)))
+                    if not part:break
+                    data.extend(part); total += len(part)
+                    if len(data) > limit or total > _BG_TOTAL+64*1024:
+                        raise BundleEntryError('bundle_capture_budget')
+                if (_bg_identity(_bg_os.fstat(leaf)) != _bg_identity(before)
+                        or _bg_identity(_bg_os.stat(name,dir_fd=fd,follow_symlinks=False)) != _bg_identity(before)):
+                    raise BundleEntryError('bundle_changed_during_read')
+                sources[name] = bytes(data); identities[name] = _bg_identity(before)
+            finally:
+                _bg_os.close(leaf)
+        if (any(_bg_identity(path.lstat()) != identity for path,identity in anchors)
+                or any(_bg_identity(_bg_os.stat(name,dir_fd=fd,follow_symlinks=False)) != identity for name,identity in identities.items())):
+            raise BundleEntryError('bundle_changed_during_read')
+        return sources
+    finally:
+        _bg_os.close(fd)
+
+
+def _bundle_config():
+    directory=_BgPath('/etc/cloudfront-sync')
+    first=_bg_capture(directory,('config.json',))['config.json']
+    if _bg_capture(directory,('config.json',))['config.json'] != first:
+        raise BundleEntryError('config_changed_during_read')
+    return _bg_json_bytes(first,64*1024,integers_only=False)
+
+
+def _bg_snapshot(assets):
+    if type(assets) is not dict or set(assets) != set(_BG_NAMES) or any(type(name) is not str for name in assets):
+        raise BundleEntryError('bundle_fixed_asset_set')
+    copied = dict(assets)
+    if (any(type(raw) is not bytes or not 0 < len(raw) <= 2*1024*1024 for raw in copied.values())
+            or sum(map(len,copied.values())) > _BG_TOTAL):
+        raise BundleEntryError('bundle_source_budget')
+    return copied
+
+
+def _bundle_verified(manifest_bytes, assets, literal):
+    """Authenticate both bootstrap byte strings before either compile/exec."""
+    assets = _bg_snapshot(assets)
+    manifest = _bg_manifest(manifest_bytes,literal)
+    if any(len(assets[name]) != manifest['assets'][name]['size']
+           or _bg_sha(assets[name]) != manifest['assets'][name]['sha256'] for name in _BG_NAMES):
+        raise BundleEntryError('bundle_bytes_differ')
+    if any(name in _bg_sys.modules for name in _BG_BOOT_MODULES):
+        raise BundleEntryError('unverified_bootstrap_registry')
+    created = []
+    try:
+        # Compile only the exact hash-verified bytes already captured above.
+        codes = [compile(assets[name],name,'exec',dont_inherit=True) for name in _BG_BOOTS]
+        modules = []
+        for name,filename,code in zip(_BG_BOOT_MODULES,_BG_BOOTS,codes):
+            module = _BgModule(name); module.__file__ = str(_BG_DIRECTORY/filename)
+            module.__cached__ = None; module.__package__ = ''
+            _bg_sys.modules[name] = module; created.append((name,module))
+            exec(code,module.__dict__); modules.append(module)
+        checked = modules[0].validate_bundle(manifest_bytes,assets,running_generation=literal)
+        expected = modules[0].helper_expectations(checked)
+        return modules[1],expected,checked
+    except BaseException:
+        for name,module in reversed(created):
+            if _bg_sys.modules.get(name) is module:del _bg_sys.modules[name]
+        raise BundleEntryError('bundle_bootstrap_failed') from None
+
+
+def _bundle_runtime(*, directory=_BG_DIRECTORY, owner=0):
+    global _BUNDLE_RUNTIME
+    if _BUNDLE_RUNTIME is not None:
+        raise BundleEntryError('bundle_runtime_reentry')
+    try:
+        # A journal's mere presence blocks runtime; it is not repaired here.
+        try:
+            _BgPath('/var/lib/cloudfront-sync/private/install-journal.json').lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise BundleEntryError('pending_installation')
+        first = _bg_capture(directory,('bundle-manifest.json',),owner=owner)['bundle-manifest.json']
+        _bg_manifest(first,BUNDLE_GENERATION_ID)
+        assets = _bg_capture(directory,_BG_NAMES,owner=owner)
+        again = _bg_capture(directory,('bundle-manifest.json',*_BG_NAMES),owner=owner)
+        if again.pop('bundle-manifest.json') != first or again != assets:
+            raise BundleEntryError('bundle_changed_during_read')
+        bootstrap,expected,checked = _bundle_verified(first,assets,BUNDLE_GENERATION_ID)
+        modules = bootstrap.BundledSources(directory,owner=owner,expected_hashes=expected).load()
+        _BUNDLE_RUNTIME = (modules,checked)
+        return modules
+    except BundleEntryError:
+        raise
+    except BaseException:
+        raise BundleEntryError('bundle_runtime_failed') from None
+# END FIXED BUNDLE ENTRY STUB
+
 import argparse
 import contextlib
-import copy
 import fcntl
-import hashlib
 import ipaddress
 import json
 import math
 import os
 from pathlib import Path
 import re
-import secrets
-import shlex
-import shutil
 import stat
-import subprocess
 import sys
-import tempfile
-import time
-import urllib.request
 
-AWS_URL = 'https://ip-ranges.amazonaws.com/ip-ranges.json'
-STATE_DIR = Path('/var/lib/cloudfront-sync')
 CONFIG = Path('/etc/cloudfront-sync/config.json')
 LOCK = Path('/run/lock/cloudfront-sync.lock')
-MARKER = 'cloudfront-sync'
-MAX_DOWNLOAD = 8 * 1024 * 1024
-TOKEN_TTL = 1800
-MAX_FILE = 16 * 1024 * 1024
+# The only subcommands that run in stage S0; argparse selects one of them.
+READ_ONLY_COMMANDS = frozenset({'verify-cohort', 'inspect-state', 'inspect-runtime'})
+# Known actor commands. Any argv token equal to one of them, wherever it is
+# (also as an option value such as ``--config apply``: over-refusal is the safe
+# side), refuses before argparse runs, so a missing or surplus (secret)
+# argument cannot turn the refusal into an argparse error. Their subparsers
+# exist only for --help and define no options.
+REFUSED_COMMANDS = frozenset({'preflight', 'plan', 'sync', 'apply', 'import', 'import-plan'})
+def lock_fd_number(value):
+    """argparse type of --lock-fd: a non-negative decimal integer of at most 10
+    digits (ASCII digits only, leading zeros allowed).
+
+    Only the syntax is checked here (anything else, including an 11th digit,
+    is invalid_arguments, so int() never sees a long string); whether the
+    number is an open descriptor of the lock file is checked when the lock is
+    taken, and its failure is sync_failed.
+    """
+    if re.fullmatch(r'[0-9]{1,10}', value) is None:
+        raise ValueError('lock fd')
+    return int(value)
+
+
+# The global options, each taking exactly one value.
+GLOBAL_OPTIONS = (('--config', {'default': str(CONFIG)}), ('--lock-fd', {'type': lock_fd_number}))
+# Usage is printed only when one of these is the whole argv.
+HELP_OPTIONS = ('-h', '--help')
 
 
 class SyncError(Exception):
     """A sanitized operational failure; never include subprocess/config content."""
 
 
-class ApprovalRequired(SyncError):
-    pass
-
-
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
-def digest(value):
-    return hashlib.sha256(canonical(value).encode()).hexdigest()
+def snapshot_config_hash(snapshot, config):
+    """The config hash the persisted baseline/ledger records (cloudfront_snapshot).
 
-
-def network(value):
-    try:
-        if not isinstance(value, str):
-            raise ValueError()
-        result = ipaddress.ip_network(value, strict=False)
-        if result.prefixlen == 0:
-            raise ValueError()
-        return str(result)
-    except ValueError as exc:
-        raise SyncError('invalid or all-addresses CIDR') from exc
-
-
-def sorted_ranges(values, dual=True):
-    if not isinstance(values, list) or not values:
-        raise SyncError('empty or invalid ranges')
-    result = sorted(set(network(v) for v in values), key=lambda v: (ipaddress.ip_network(v).version, int(ipaddress.ip_network(v).network_address), ipaddress.ip_network(v).prefixlen))
-    if dual and {ipaddress.ip_network(v).version for v in result} != {4, 6}:
-        raise SyncError('both IPv4 and IPv6 ranges are required')
-    return result
-
-
-def parse_aws(value):
-    if not isinstance(value, dict) or not isinstance(value.get('syncToken'), str) or not re.fullmatch(r'[0-9]{1,20}', value['syncToken']):
-        raise SyncError('invalid AWS publication token')
-    ranges = []
-    for key, prefix, family in [('prefixes', 'ip_prefix', 4), ('ipv6_prefixes', 'ipv6_prefix', 6)]:
-        if not isinstance(value.get(key), list):
-            raise SyncError('missing AWS prefix family')
-        for entry in value[key]:
-            if not isinstance(entry, dict):
-                raise SyncError('invalid AWS prefix entry')
-            if entry.get('service') != 'CLOUDFRONT_ORIGIN_FACING':
-                continue
-            cidr = network(entry.get(prefix))
-            if ipaddress.ip_network(cidr).version != family:
-                raise SyncError('AWS prefix family mismatch')
-            ranges.append(cidr)
-    return {'aws_sync_token': value['syncToken'], 'ranges': sorted_ranges(ranges)}
+    Delegates to the bundle's public config_hash, the one definition the
+    ledger also uses, instead of a CLI re-implementation.
+    """
+    return snapshot.config_hash(config)
 
 
 def safe_path(value, prefixes):
@@ -102,6 +339,23 @@ def safe_path(value, prefixes):
 
 
 def validate_config(c):
+    def ascii_only(value):
+        # True when every string (key or value) in the JSON value is ASCII.
+        if isinstance(value, str):
+            return value.isascii()
+        if isinstance(value, dict):
+            return all(ascii_only(key) and ascii_only(item) for key, item in value.items())
+        if isinstance(value, list):
+            return all(ascii_only(item) for item in value)
+        return True
+
+    # Checked first and for the whole value (keys too): an accepted config is
+    # ASCII, so its canonical JSON is the same bytes with or without
+    # ensure_ascii and the bundle's config_hash (ensure_ascii=False) equals
+    # the value already persisted in P, state and journal. A lone surrogate
+    # (JSON "\ud800") is not ASCII either.
+    if not ascii_only(c):
+        raise SyncError('config strings must be ASCII')
     if not isinstance(c, dict) or set(c) != {'host_address', 'firewall', 'nginx', 'limits', 'notify_unit'}:
         raise SyncError('invalid config keys')
     try:
@@ -110,6 +364,9 @@ def validate_config(c):
         ipaddress.ip_address(c['host_address'])
     except (ValueError, TypeError) as exc:
         raise SyncError('host_address must be an IP address') from exc
+    # A public host address never has a zone; ipaddress accepts "fe80::1%eth0".
+    if '%' in c['host_address']:
+        raise SyncError('host_address must not carry an IPv6 scope id')
     f, n, limits = c['firewall'], c['nginx'], c['limits']
     if not isinstance(f, dict) or set(f) != {'backend', 'ports'} or f['backend'] not in ('ufw', 'none'):
         raise SyncError('invalid firewall config')
@@ -143,17 +400,6 @@ def validate_config(c):
     return c
 
 
-def within_limits(old, new, limits):
-    if not old or len(set(old) ^ set(new)) > limits['max_changes']:
-        return False
-    for version in (4, 6):
-        previous = sum(ipaddress.ip_network(x).version == version for x in old)
-        current = sum(ipaddress.ip_network(x).version == version for x in new)
-        if not previous or current / previous < limits['min_ratio']:
-            return False
-    return True
-
-
 def check_path(path, *, directory=False, writable=False):
     """Reject symlinks and writable-by-other ancestors, including target itself."""
     p = Path(path)
@@ -165,7 +411,6 @@ def check_path(path, *, directory=False, writable=False):
                 raise SyncError('required path is missing')
             raise SyncError('required parent directory is missing')
         if stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
-            # /tmp is not used by production paths; tests use Engine directly.
             raise SyncError('unsafe ownership, mode, or symlink')
         if current != p and not stat.S_ISDIR(info.st_mode):
             raise SyncError('non-directory path ancestor')
@@ -177,780 +422,45 @@ def check_path(path, *, directory=False, writable=False):
         raise SyncError('private file is accessible by other users')
 
 
-def read_text(path, private=False, secure=True):
-    if secure:
-        check_path(path, writable=private)
-    try:
-        with open(path, 'r', encoding='utf-8') as handle:
-            result = handle.read(MAX_FILE + 1)
-        if len(result) > MAX_FILE:
-            raise SyncError('file exceeds size limit')
-        return result
-    except (OSError, UnicodeError) as exc:
-        raise SyncError('unable to read required file') from exc
-
-
-def json_read(path, secure=False):
-    try:
-        return json.loads(read_text(path, private=secure, secure=secure))
-    except (ValueError, OSError) as exc:
-        raise SyncError('invalid JSON file') from exc
-
-
-def atomic_text(path, content, mode=0o600):
-    path = Path(path)
-    if path.is_symlink():
-        raise SyncError('refusing symlink destination')
-    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            os.fchmod(handle.fileno(), mode)
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def unlink_durable(path):
-    path = Path(path)
-    path.unlink()
-    dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-
-
-def atomic_json(path, value, mode=0o600):
-    atomic_text(path, canonical(value) + '\n', mode)
-
-
-def make_rule(source, port, comment=MARKER):
-    source = network(source)
-    args = ['allow', 'proto', 'tcp', 'from', source, 'to', 'any', 'port', str(port)]
-    if comment:
-        args += ['comment', comment]
-    return {'args': args, 'source': source, 'port': port, 'comment': comment,
-            'proto': 'tcp', 'direction': 'in', 'destination': 'any'}
-
-
-def parse_ufw(text):
-    """Read ufw's replayable rules, preserving commands for exact ownership.
-
-    Rules outside the narrow allow/in/tcp/source/any/one-port shape are opaque
-    and never touched. A malformed rule carrying our marker is an error.
-    """
-    rules = []
-    for line in text.splitlines():
-        if not line.startswith('ufw '):
-            continue
-        try:
-            args = shlex.split(line)[1:]
-        except ValueError as exc:
-            raise SyncError('invalid UFW rule output') from exc
-        rule = {'args': args, 'source': None, 'port': None, 'comment': '', 'proto': None, 'direction': None, 'destination': None}
-        tokens = list(args)
-        if 'comment' in tokens:
-            i = tokens.index('comment')
-            if i == len(tokens) - 2:
-                rule['comment'] = tokens[i + 1]
-                tokens = tokens[:i]
-        # Match token semantics rather than ufw's formatting/order.
-        parsed = {'action': None, 'proto': None, 'source': None, 'destination': None, 'port': None, 'direction': 'in'}
-        try:
-            if tokens and tokens[0] == 'allow':
-                parsed['action'] = tokens.pop(0)
-                while tokens:
-                    key = tokens.pop(0)
-                    if key in ('in', 'out'):
-                        parsed['direction'] = key
-                    elif key in ('proto', 'from', 'to', 'port'):
-                        val = tokens.pop(0)
-                        parsed[{'from': 'source', 'to': 'destination'}.get(key, key)] = val
-                    else:
-                        raise ValueError()
-                if parsed['source'] and parsed['destination'] == 'any' and parsed['proto'] == 'tcp' and parsed['direction'] == 'in' and parsed['port'] and re.fullmatch(r'[0-9]+', parsed['port']):
-                    rule = make_rule(parsed['source'], int(parsed['port']), rule['comment'])
-                    if not 1 <= rule['port'] <= 65535:
-                        raise ValueError()
-        except (ValueError, IndexError, SyncError):
-            pass
-        if rule['comment'] == MARKER and (rule['source'] is None or rule['port'] is None):
-            raise SyncError('unrecognized owned UFW rule')
-        rules.append(rule)
-    return rules
-
-
-
-
-def port_may_match(spec, port):
-    """Unknown/application port expressions are deliberately fail-closed."""
-    if spec is None:
-        return True
-    if not isinstance(spec, str):
-        return True
-    if '/' in spec:
-        spec, proto = spec.rsplit('/', 1)
-        if proto == 'udp':
-            return False
-        if proto != 'tcp':
-            return True
-    for item in spec.split(','):
-        if re.fullmatch('[0-9]+', item):
-            if int(item) == port:
-                return True
-        elif re.fullmatch('[0-9]+:[0-9]+', item):
-            low, high = map(int, item.split(':'))
-            if low <= port <= high:
-                return True
-        else:
-            return True
-    return False
-
-
-def policy_from_status(tokens):
-    action_index = next((i for i, t in enumerate(tokens) if t in ('ALLOW', 'DENY', 'REJECT', 'LIMIT')), None)
-    if action_index is None:
-        return {'action': 'unknown', 'source': None, 'port': None}
-    action = tokens[action_index].lower()
-    after = tokens[action_index + 1:]
-    if after and after[0] in ('OUT', 'FWD'):
-        return None
-    if after and after[0] == 'IN':
-        after = after[1:]
-    source = None
-    if after:
-        if after[0] == 'Anywhere':
-            source = 'any'
-        else:
-            try:
-                source = network(after[0])
-            except SyncError:
-                pass
-    destination = tokens[:action_index]
-    if 'on' in destination:
-        destination = destination[:destination.index('on')]
-    port = destination[-1] if destination else None
-    if port == 'Anywhere':
-        port = None
-    return {'action': action, 'source': source, 'port': port}
-
-
-def policy_may_match(policy, cidr, port):
-    if policy is None or not port_may_match(policy['port'], port):
-        return False
-    source = policy['source']
-    if source not in (None, 'any') and not ipaddress.ip_network(source).overlaps(ipaddress.ip_network(cidr)):
-        return False
-    return True
-
-
-def rule_identity(rule):
-    return {key: rule[key] for key in ('source', 'port', 'proto', 'direction', 'destination')}
-
-
-def parse_ufw_numbered(text):
-    """Capture actual kernel-order indices, including both generic rule families.
-
-    `ufw show added` collapses generic dual-stack rules into one command, so
-    its line numbers must NEVER be used with `ufw insert`.
-    """
-    result = []
-    for line in text.splitlines():
-        match = re.match(r'^\[\s*([0-9]+)\]\s+(.+)$', line.strip())
-        if not match:
-            continue
-        body, _, comment = match.group(2).partition('#')
-        tokens = body.split()
-        family = 6 if '(v6)' in tokens else 4
-        tokens = [x for x in tokens if x != '(v6)']
-        key = digest({'family': family, 'opaque': ' '.join(tokens), 'comment': comment.strip()})
-        try:
-            if len(tokens) == 4 and tokens[1:3] == ['ALLOW', 'IN'] and re.fullmatch(r'[0-9]+/tcp', tokens[0]):
-                rule = make_rule(tokens[3], int(tokens[0].split('/')[0]), comment.strip())
-                key = digest(rule)
-        except SyncError:
-            pass
-        result.append({'number': int(match.group(1)), 'family': family, 'key': key, 'policy': policy_from_status(tokens)})
-    if any(x['number'] != i + 1 for i, x in enumerate(result)) or len({x['key'] for x in result}) != len(result):
-        raise SyncError('ambiguous UFW runtime rule order')
-    return result
-
-
-def render_nginx(ranges):
-    return {'cloudfront-geo.conf': ''.join(f'{r} 1;\n' for r in ranges),
-            'cloudfront-realip.conf': ''.join(f'set_real_ip_from {r};\n' for r in ranges)}
-
-
-def parse_nginx_ranges(files):
-    values = []
-    for name, prefix, suffix in [('cloudfront-geo.conf', '', ' 1;'), ('cloudfront-realip.conf', 'set_real_ip_from ', ';')]:
-        found = []
-        for line in files[name].splitlines():
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if not line.startswith(prefix) or not line.endswith(suffix):
-                raise SyncError('unexpected shared nginx directive')
-            cidr = line[len(prefix):len(line) - len(suffix)].strip()
-            found.append(network(cidr))
-        values.append(sorted_ranges(found))
-    if values[0] != values[1]:
-        raise SyncError('nginx geo/realip ranges differ')
-    return values[0]
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise SyncError('AWS redirect refused')
-
-
 class Host:
-    def command(self, args):
-        try:
-            result = subprocess.run(args, capture_output=True, text=True, timeout=120,
-                                    env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SyncError('host command unavailable or timed out') from exc
-        if result.returncode:
-            raise SyncError('host command failed')
-        return result.stdout
+    """Refusal points only; S0 has no host-command, fetch or mutation actor.
 
-    def fetch(self):
-        try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-            with opener.open(AWS_URL, timeout=30) as response:
-                body = response.read(MAX_DOWNLOAD + 1)
-            if len(body) > MAX_DOWNLOAD:
-                raise SyncError('AWS response exceeds size limit')
-            return json.loads(body)
-        except (OSError, ValueError) as exc:
-            raise SyncError('AWS fetch failed') from exc
+    S0 removed the old B-draft command runner, AWS fetcher, UFW/nginx parsers,
+    observers and mutation helpers, so deleting a refusal can no longer revive
+    them. Neither class is reachable from main(). C4 must connect a separately
+    reviewed actor instead of restoring the removed code.
+    """
+    # Every signature accepts any arguments, so the refusal never depends on
+    # how a caller (old or new) spells the call: no TypeError path exists.
+    def command(self, *_args, **_kwargs):
+        # Refuse first: no bundle/adapter lookup, no argv inspection.
+        raise SyncError('runtime_actor_not_connected')
 
-    def check_target(self, config):
-        """Identity and SSH guards must run before even recovery mutations."""
-        for command in ['ip', 'systemctl', 'sshd']:
-            if not shutil.which(command):
-                raise SyncError('required host command missing')
-        addresses = json.loads(self.command(['ip', '-json', 'address', 'show']))
-        expected = str(ipaddress.ip_address(config['host_address']))
-        if not any(str(ipaddress.ip_address(a['local'])) == expected for item in addresses for a in item.get('addr_info', []) if 'local' in a):
-            raise SyncError('host address does not identify this host')
-        ssh_config = self.command(['sshd', '-T'])
-        ssh_ports = {int(m.group(1)) for m in re.finditer(r'^port ([0-9]+)$', ssh_config, re.M)}
-        if not ssh_ports or ssh_ports.intersection(config['firewall']['ports']):
-            raise SyncError('SSH port is protected from synchronization')
-        if config['firewall']['backend'] == 'ufw':
-            if not shutil.which('ufw') or not self.command(['ufw', 'status']).startswith('Status: active'):
-                raise SyncError('UFW must already be active')
-
-    def preflight(self, config):
-        self.check_target(config)
-        n = config['nginx']
-        if n['enabled']:
-            if not shutil.which('nginx'):
-                raise SyncError('nginx missing')
-            check_path(n['shared_dir'], directory=True)
-            self.command(['nginx', '-t'])
-            effective = self.command(['nginx', '-T'])
-            for bundle in n['bundles']:
-                for file in bundle.values():
-                    check_path(file)
-                    if f'# configuration file {file}:' not in effective:
-                        raise SyncError('configured nginx bundle is not active')
-                geo = read_text(bundle['geo_file'])
-                realip = read_text(bundle['realip_file'])
-                # Strip comments, then require includes to be live directives.
-                # nginx -t validates syntax; no text from these files is emitted.
-                geo_tokens = nginx_tokens(geo)
-                real_tokens = nginx_tokens(realip)
-                geo_include = str(Path(n['shared_dir']) / 'cloudfront-geo.conf')
-                real_include = str(Path(n['shared_dir']) / 'cloudfront-realip.conf')
-                blocks = nginx_geo_blocks(geo_tokens)
-                selected = [(source, chunks(body)) for source, body in blocks if ['include', geo_include, ';'] in chunks(body)]
-                if len(selected) != 1 or selected[0][0] != '$realip_remote_addr':
-                    raise SyncError('nginx geo include is not bound to original peer address')
-                body = selected[0][1]
-                if body.count(['include', geo_include, ';']) != 1 or body.count(['default', '0', ';']) != 1 or any(d not in (['include', geo_include, ';'], ['default', '0', ';']) for d in body):
-                    raise SyncError('nginx geo contains unmanaged address policy')
-                if chunks(real_tokens).count(['include', real_include, ';']) != 1:
-                    raise SyncError('nginx realip include missing or duplicated')
-                combined = chunks(geo_tokens) + chunks(real_tokens)
-                if ['real_ip_header', 'X-Forwarded-For', ';'] not in combined or ['real_ip_recursive', 'off', ';'] not in combined:
-                    raise SyncError('nginx realip behavior differs from required policy')
-                if any(d[0] == 'set_real_ip_from' or (d[0] == 'real_ip_header' and d != ['real_ip_header', 'X-Forwarded-For', ';']) or (d[0] == 'real_ip_recursive' and d != ['real_ip_recursive', 'off', ';']) for d in combined):
-                    raise SyncError('nginx contains unmanaged realip trust policy')
-
-    def snapshot(self, config):
-        n = config['nginx']
-        files, bundles = {}, {}
-        if n['enabled']:
-            for name in render_nginx([]):
-                files[name] = read_text(Path(n['shared_dir']) / name)
-            for bundle in n['bundles']:
-                for path in bundle.values():
-                    bundles[path] = hashlib.sha256(read_text(path).encode()).hexdigest()
-        rules, runtime = [], []
-        if config['firewall']['backend'] == 'ufw':
-            rules = parse_ufw(self.command(['ufw', 'show', 'added']))
-            runtime = parse_ufw_numbered(self.command(['ufw', 'status', 'numbered']))
-            for rule in rules:
-                if rule['source'] and sum(r['key'] == digest(rule) for r in runtime) != 1:
-                    raise SyncError('configured UFW rule not found exactly once in live policy')
-        return {'rules': rules, 'runtime': runtime, 'nginx': files, 'bundles': bundles}
-
-    def add_rule(self, rule):
-        self.command(['ufw'] + rule['args'])
-
-    def delete_rule(self, rule):
-        self.command(['ufw', '--force', 'delete'] + rule['args'])
-
-    def restore_rule(self, rule, before):
-        key = digest(rule)
-        original = before['runtime']
-        matches = [i for i, r in enumerate(original) if r['key'] == key]
-        if len(matches) != 1:
-            raise SyncError('missing original runtime position for recovery')
-        position = matches[0]
-        current = parse_ufw_numbered(self.command(['ufw', 'status', 'numbered']))
-        # Insert before the nearest surviving original successor of this IP
-        # family, rather than guessing indices from collapsed show-added lines.
-        # New transaction rules may shift global v6 indices; the successor's
-        # CURRENT numbered index accounts for that without touching its rule.
-        for anchor in original[position + 1:]:
-            if anchor['family'] != original[position]['family']:
-                continue
-            successor = [r for r in current if r['key'] == anchor['key']]
-            if successor:
-                self.command(['ufw', 'insert', str(successor[0]['number'])] + rule['args'])
-                return
-        self.add_rule(rule)
-
-    def write_nginx(self, config, files):
-        for name, content in files.items():
-            if name not in ('cloudfront-geo.conf', 'cloudfront-realip.conf'):
-                raise SyncError('invalid nginx destination')
-            path = Path(config['nginx']['shared_dir']) / name
-            check_path(path)
-            atomic_text(path, content, 0o644)
-
-    def check_reload_nginx(self):
-        self.command(['nginx', '-t'])
-        self.command(['systemctl', 'reload', 'nginx.service'])
-        self.command(['systemctl', 'is-active', '--quiet', 'nginx.service'])
-
-    def stop_timer(self):
-        self.command(['systemctl', 'disable', '--now', 'cloudfront-sync.timer'])
-
-
-def nginx_tokens(text):
-    """Tokenize just enough nginx syntax to inspect includes without logging it."""
-    lexer = shlex.shlex(text, posix=True, punctuation_chars='{};')
-    lexer.whitespace_split = True
-    lexer.commenters = '#'
-    tokens = []
-    try:
-        for token in lexer:
-            if token and set(token) <= set('{};'):
-                tokens.extend(token)
-            else:
-                tokens.append(token)
-    except ValueError as exc:
-        raise SyncError('invalid nginx bundle syntax') from exc
-    return tokens
-
-
-def chunks(tokens):
-    result, current = [], []
-    for token in tokens:
-        if token in ('{', '}'):
-            current = []
-        else:
-            current.append(token)
-            if token == ';':
-                result.append(current)
-                current = []
-    return result
-
-
-def nginx_geo_blocks(tokens):
-    result = []
-    for i in range(len(tokens) - 3):
-        if tokens[i] == 'geo' and tokens[i + 3] == '{':
-            depth, j = 1, i + 4
-            while j < len(tokens) and depth:
-                depth += (tokens[j] == '{') - (tokens[j] == '}')
-                j += 1
-            if depth:
-                raise SyncError('unbalanced nginx geo block')
-            result.append((tokens[i + 1], tokens[i + 4:j - 1]))
-    return result
+    def write_nginx(self, *_args, **_kwargs):
+        # Refuse first: neither the config nor the rendered files are inspected.
+        raise SyncError('runtime_actor_not_connected')
 
 
 class Engine:
-    def __init__(self, config, state_dir=None, host=None, clock=time.time):
-        self.config = copy.deepcopy(validate_config(config))
-        self.root = Path(state_dir) if state_dir is not None else STATE_DIR
-        self.private = self.root / 'private'
-        self.host = host or Host()
-        self.clock = clock
-        self.root.mkdir(mode=0o755, parents=True, exist_ok=True)
-        self.private.mkdir(mode=0o700, exist_ok=True)
-        if self.root.is_symlink() or self.private.is_symlink():
-            raise SyncError('state directory symlink refused')
-        for path in (self.private / 'state.json', self.private / 'pending.json', self.private / 'journal.json'):
-            if path.is_symlink():
-                raise SyncError('state file symlink refused')
+    """Refusal point only: the old B-draft transaction actor was removed in S0.
 
-    def state(self):
-        path = self.private / 'state.json'
-        if not path.exists():
-            return None
-        state = json_read(path)
-        if not isinstance(state, dict) or state.get('version') != 1 or state.get('initialized') is not True or not isinstance(state.get('owned_rules'), list) or not isinstance(state.get('snapshot'), dict):
-            raise SyncError('invalid persisted state')
-        if sorted_ranges(state.get('ranges')) != state['ranges']:
-            raise SyncError('noncanonical state ranges')
-        if not re.fullmatch('[0-9]{1,20}', state.get('aws_sync_token', '')):
-            raise SyncError('invalid persisted AWS token')
-        return state
-
-    def status(self):
-        path = self.root / 'status.json'
-        return json_read(path) if path.exists() else {}
-
-    def publish(self, *, approval=False, recovery=False, error=None):
-        state = self.state()
-        status = {'version': 1, 'initialized': bool(state), 'last_success': state.get('last_success') if state else None,
-                  'approval_required': approval, 'recovery_failed': recovery, 'error_code': error, 'updated_at': int(self.clock())}
-        atomic_json(self.root / 'status.json', status, 0o644)
-
-    def preflight(self):
-        # Recovery reads only securely owned files and transaction evidence;
-        # a crash may have left nginx syntactically invalid, so recover before
-        # requiring a healthy live daemon configuration.
-        self.recover()
-        self.host.preflight(self.config)
-        state = self.state()
-        snapshot = self.host.snapshot(self.config)
-        if self.config['nginx']['enabled']:
-            parse_nginx_ranges(snapshot['nginx'])
-        if state and (state['config_hash'] != digest(self.config) or digest(snapshot) != digest(state['snapshot'])):
-            raise SyncError('config or live state differs from confirmed baseline')
-        if not state and any(r['comment'] == MARKER for r in snapshot['rules']):
-            raise SyncError('owned rules exist without confirmed state; import required')
-        return snapshot
-
-    def fetch(self):
-        candidate = parse_aws(self.host.fetch())
-        state = self.state()
-        if state and int(candidate['aws_sync_token']) < int(state['aws_sync_token']):
-            raise SyncError('AWS publication is older than confirmed state')
-        return candidate
-
-    def _pending(self, operation, candidate, snapshot, extra=None):
-        plan = {'version': 1, 'operation': operation, 'host_address': self.config['host_address'], 'config_hash': digest(self.config),
-                'baseline_hash': digest(snapshot), 'candidate': candidate, 'candidate_hash': digest(candidate),
-                'created_at': int(self.clock()), 'expires_at': int(self.clock()) + TOKEN_TTL,
-                'approve_token': secrets.token_urlsafe(32)}
-        if extra:
-            plan.update(extra)
-        atomic_json(self.private / 'pending.json', plan)
-        state = self.state()
-        old = state['ranges'] if state else []
-        public = {'operation': operation, 'add': [r for r in candidate['ranges'] if r not in old],
-                  'delete': [r for r in old if r not in candidate['ranges']], 'aws_sync_token': candidate['aws_sync_token'],
-                  'approval_required': operation == 'import' or not state or state.get('last_success') is None or not within_limits(old, candidate['ranges'], self.config['limits']),
-                  'approve_token': plan['approve_token'], 'expires_at': plan['expires_at']}
-        return public
-
-    def plan(self):
-        snapshot = self.preflight()
-        candidate = self.fetch()
-        state = self.state()
-        needs_import = not state and any(r['port'] in self.config['firewall']['ports'] for r in snapshot['rules'])
-        if not needs_import:
-            self._check_policy(snapshot, self._desired_rules(candidate['ranges']))
-        result = self._pending('apply', candidate, snapshot)
-        # Never claim existing non-owned web rules through an initial apply.
-        result['import_required'] = needs_import
-        self.publish(approval=result['approval_required'])
-        return result
-
-    def _approved(self, token, operation):
-        path = self.private / 'pending.json'
-        if not path.exists():
-            raise SyncError('no pending approval')
-        plan = json_read(path)
-        if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', token) or not secrets.compare_digest(token, plan.get('approve_token', '')):
-            raise SyncError('approval token does not match pending plan')
-        if plan.get('operation') != operation or int(self.clock()) >= plan.get('expires_at', 0) or int(self.clock()) < plan.get('created_at', 0):
-            raise SyncError('approval token expired or wrong operation')
-        snapshot = self.preflight()
-        if plan['host_address'] != self.config['host_address'] or plan['config_hash'] != digest(self.config) or plan['baseline_hash'] != digest(snapshot):
-            raise SyncError('approval is not bound to current host/config/state')
-        if digest(plan['candidate']) != plan['candidate_hash']:
-            raise SyncError('pending candidate was modified')
-        if operation == 'apply' and self.fetch() != plan['candidate']:
-            raise SyncError('AWS publication changed; obtain a new plan')
-        return plan, snapshot
-
-    def apply(self, token):
-        plan, snapshot = self._approved(token, 'apply')
-        if not self.state() and any(r['port'] in self.config['firewall']['ports'] for r in snapshot['rules']):
-            raise SyncError('legacy web rules require explicit import')
-        # Consume before the first side effect; failures require a new approval.
-        unlink_durable(self.private / 'pending.json')
-        return self._transaction(plan['candidate'], snapshot)
-
-    def sync(self):
-        snapshot = self.preflight()
-        candidate = self.fetch()
-        state = self.state()
-        if not state or state.get('last_success') is None or not within_limits(state['ranges'], candidate['ranges'], self.config['limits']):
-            self._pending('apply', candidate, snapshot)
-            self.publish(approval=True, error='approval_required')
-            raise ApprovalRequired('change requires approval; inspect plan')
-        return self._transaction(candidate, snapshot)
-
-    def _desired_rules(self, ranges):
-        state = self.state()
-        old = state['owned_rules'] if state else []
-        desired = []
-        if self.config['firewall']['backend'] == 'ufw':
-            for cidr in ranges:
-                for port in self.config['firewall']['ports']:
-                    matches = [r for r in old if r['source'] == cidr and r['port'] == port]
-                    desired.append(matches[0] if matches else make_rule(cidr, port))
-        return desired
-
-    def _check_policy(self, before, target_rules, importing=False):
-        """Prove appended rules are effective and cannot claim an admin tuple.
-
-        UFW is first-match and adding the same tuple with a different comment
-        updates the existing rule. Neither case can be inferred from command
-        success, so reject them before touching nginx or UFW.
-        """
-        state = self.state()
-        old_owned = state['owned_rules'] if state else (target_rules if importing else [])
-        old_keys = {digest(rule) for rule in old_owned}
-        for target in target_rules:
-            key = digest(target)
-            family = ipaddress.ip_network(target['source']).version
-            existing = [r for r in before['runtime'] if r['key'] == key]
-            position = existing[0]['number'] if existing else math.inf
-            for entry in before['runtime']:
-                if entry['family'] != family:
-                    continue
-                policy = entry.get('policy')
-                if not policy_may_match(policy, target['source'], target['port']):
-                    continue
-                if entry['number'] < position and policy['action'] != 'allow':
-                    raise SyncError('unmanaged policy may shadow a CloudFront allow; operator review required')
-                if target not in old_owned and entry['key'] not in old_keys and policy['action'] == 'allow' and policy['source'] in (None, target['source']):
-                    raise SyncError('new CloudFront tuple collides with an unowned allow')
-            if target not in old_owned and any(rule not in old_owned and rule_identity(rule) == rule_identity(target) for rule in before['rules']):
-                raise SyncError('new CloudFront tuple already belongs to another operator')
-
-    def _transaction(self, candidate, before):
-        self.host.check_target(self.config)
-        if self.host.snapshot(self.config) != before:
-            raise SyncError('live state changed while obtaining candidate; no changes applied')
-        old_state = self.state()
-        old_rules = old_state['owned_rules'] if old_state else []
-        target_rules = self._desired_rules(candidate['ranges'])
-        self._check_policy(before, target_rules)
-        files = render_nginx(candidate['ranges']) if self.config['nginx']['enabled'] else {}
-        journal = {'version': 1, 'config_hash': digest(self.config), 'before': before,
-                   'old_state': old_state, 'target_rules': target_rules, 'target_nginx': files, 'new_state': None,
-                   'addition_attempts': [], 'deletion_attempts': []}
-        if files != before['nginx'] or target_rules != old_rules:
-            # Keep the most recent pre-change evidence after commit, while the
-            # active journal is removed only when that transaction is durable.
-            # No-op heartbeats must not replace the useful change backup.
-            atomic_json(self.private / 'backup.json', {'created_at': int(self.clock()), **journal})
-        atomic_json(self.private / 'journal.json', journal)
-        try:
-            if files != before['nginx']:
-                self.host.write_nginx(self.config, files)
-                self.host.check_reload_nginx()
-            for rule in target_rules:
-                if rule not in old_rules:
-                    journal['addition_attempts'].append(rule)
-                    atomic_json(self.private / 'journal.json', journal)
-                    self.host.add_rule(rule)
-            for rule in old_rules:
-                if rule not in target_rules:
-                    journal['deletion_attempts'].append(rule)
-                    atomic_json(self.private / 'journal.json', journal)
-                    self.host.delete_rule(rule)
-            after = self.host.snapshot(self.config)
-            self._verify_after(before, after, old_rules, target_rules, files)
-            state = {'version': 1, 'initialized': True, 'ranges': candidate['ranges'],
-                     'aws_sync_token': candidate['aws_sync_token'], 'config_hash': digest(self.config),
-                     'owned_rules': target_rules, 'snapshot': after, 'last_success': int(self.clock())}
-            journal['new_state'] = state
-            atomic_json(self.private / 'journal.json', journal)
-            atomic_json(self.private / 'state.json', state)
-            unlink_durable(self.private / 'journal.json')
-        except Exception as exc:
-            try:
-                self._rollback(journal)
-            except Exception as rollback_exc:
-                self._recovery_failed()
-                raise SyncError('transaction and recovery failed; timer stopped') from rollback_exc
-            self.publish(error='transaction_failed')
-            raise SyncError('transaction failed and was rolled back') from exc
-        # The transaction is committed once its durable journal is removed.
-        # A later monitoring-output failure must not roll back committed policy.
-        self.publish()
-        return {'changed': before != after, 'initialized': True, 'last_success': state['last_success']}
-
-    def _verify_after(self, before, after, old_owned, target_owned, files):
-        def remaining(rules, owned):
-            result = list(rules)
-            for rule in owned:
-                if rule not in result:
-                    raise SyncError('expected owned UFW rule missing')
-                result.remove(rule)
-            return result
-        if remaining(before['rules'], old_owned) != remaining(after['rules'], target_owned):
-            raise SyncError('unmanaged UFW rules changed during transaction')
-        old_keys, new_keys = {digest(r) for r in old_owned}, {digest(r) for r in target_owned}
-        if [r['key'] for r in before['runtime'] if r['key'] not in old_keys] != [r['key'] for r in after['runtime'] if r['key'] not in new_keys]:
-            raise SyncError('unmanaged live UFW order changed during transaction')
-        if after['nginx'] != files or after['bundles'] != before['bundles']:
-            raise SyncError('nginx effective file state differs after update')
-        # Same rule cannot be owned twice, even if ufw duplicated it externally.
-        if any(after['rules'].count(rule) != 1 for rule in target_owned):
-            raise SyncError('duplicate owned UFW rule')
-
-    def _rollback(self, journal):
-        if journal['config_hash'] != digest(self.config):
-            raise SyncError('recovery config differs from journal')
-        current = self.host.snapshot(self.config)
-        before = journal['before']
-        if current['bundles'] != before['bundles']:
-            raise SyncError('bundle changed; refusing destructive recovery')
-        for name, content in current['nginx'].items():
-            if content not in (before['nginx'][name], journal['target_nginx'][name]):
-                raise SyncError('shared nginx file externally changed during recovery')
-        old_owned = journal['old_state']['owned_rules'] if journal['old_state'] else []
-        allowed = old_owned + journal['target_rules']
-        if any(r['comment'] == MARKER and r not in allowed for r in current['rules']):
-            raise SyncError('unexpected owned UFW rule during recovery')
-        # A missing unchanged rule is an external revocation, not a script
-        # deletion. Never reinstate it merely to make the old snapshot match.
-        # Durable per-operation intent also prevents undoing steps never run.
-        deletion_attempts = journal.get('deletion_attempts', [])
-        addition_attempts = journal.get('addition_attempts', [])
-        if any(rule not in current['rules'] and (rule in journal['target_rules'] or rule not in deletion_attempts) for rule in old_owned):
-            raise SyncError('owned rule externally revoked; refusing to reinstate it')
-        # Restore old permissions before removing this transaction's additions.
-        for rule in before['rules']:
-            if rule in old_owned and rule not in current['rules'] and rule in deletion_attempts:
-                self.host.restore_rule(rule, before)
-        for rule in journal['target_rules']:
-            if rule not in old_owned and rule in current['rules'] and rule in addition_attempts:
-                # Never delete a permission that existed outside our ownership
-                # before the transaction, even if ufw replaced its comment.
-                if any(old not in old_owned and rule_identity(old) == rule_identity(rule) for old in before['rules']):
-                    raise SyncError('unowned rule collision requires operator recovery')
-                self.host.delete_rule(rule)
-        if current['nginx'] != before['nginx']:
-            self.host.write_nginx(self.config, before['nginx'])
-            self.host.check_reload_nginx()
-        after = self.host.snapshot(self.config)
-        if after != before:
-            # Leave journal for an operator; never erase unrelated concurrent edits.
-            raise SyncError('restored state cannot be confirmed')
-        state_path = self.private / 'state.json'
-        if journal['old_state']:
-            atomic_json(state_path, journal['old_state'])
-        elif state_path.exists():
-            unlink_durable(state_path)
-        unlink_durable(self.private / 'journal.json')
-
-    def _recovery_failed(self):
-        try:
-            self.host.stop_timer()
-        finally:
-            self.publish(recovery=True, error='recovery_failed')
-
-    def recover(self):
-        path = self.private / 'journal.json'
-        if not path.exists():
-            return
-        # A transplanted journal or a changed SSH port must never authorize
-        # recovery on the wrong target. nginx health is deliberately checked
-        # later, because recoverable partial include writes can break it.
-        self.host.check_target(self.config)
-        try:
-            journal = json_read(path)
-            if not isinstance(journal, dict) or journal.get('version') != 1 or journal.get('config_hash') != digest(self.config):
-                raise SyncError('invalid recovery journal')
-            new_state = journal.get('new_state')
-            if new_state and self.state() == new_state and self.host.snapshot(self.config) == new_state['snapshot']:
-                unlink_durable(path)
-                self.publish()
-                return
-            self._rollback(journal)
-        except Exception as exc:
-            self._recovery_failed()
-            raise SyncError('recovery incomplete; timer stopped') from exc
-
-    def import_plan(self, legacy_path):
-        if self.state():
-            raise SyncError('import requires an uninitialized host')
-        snapshot = self.preflight()
-        legacy = json_read(legacy_path)
-        raw = legacy.get('ranges') if isinstance(legacy, dict) else None
-        if isinstance(raw, dict) and set(raw) in ({'ipv4', 'ipv6'}, {'v4', 'v6'}):
-            raw = raw.get('ipv4', raw.get('v4')) + raw.get('ipv6', raw.get('v6'))
-        ranges = sorted_ranges(raw)
-        if self.config['nginx']['enabled'] and parse_nginx_ranges(snapshot['nginx']) != ranges:
-            raise SyncError('legacy ranges do not match both shared nginx files')
-        owned = []
-        if self.config['firewall']['backend'] == 'ufw':
-            for cidr in ranges:
-                for port in self.config['firewall']['ports']:
-                    matching = [r for r in snapshot['rules'] if r['source'] == cidr and r['port'] == port]
-                    if len(matching) != 1:
-                        raise SyncError('legacy UFW rule missing or ambiguous')
-                    owned.append(matching[0])
-        self._check_policy(snapshot, owned, importing=True)
-        # Fetch establishes publication freshness, not which rules we import.
-        candidate = self.fetch()
-        baseline = {'aws_sync_token': candidate['aws_sync_token'], 'ranges': ranges}
-        return self._pending('import', baseline, snapshot,
-                             {'legacy_path': str(legacy_path), 'legacy_hash': digest(legacy), 'owned_rules': owned})
-
-    def import_state(self, token):
-        if self.state():
-            raise SyncError('import requires an uninitialized host')
-        plan, snapshot = self._approved(token, 'import')
-        if digest(json_read(plan['legacy_path'])) != plan['legacy_hash']:
-            raise SyncError('legacy evidence changed')
-        state = {'version': 1, 'initialized': True, 'ranges': plan['candidate']['ranges'],
-                 'aws_sync_token': plan['candidate']['aws_sync_token'], 'config_hash': digest(self.config),
-                 'owned_rules': plan['owned_rules'], 'snapshot': snapshot, 'last_success': None}
-        # Import is ownership transfer, not successful AWS synchronization.
-        atomic_json(self.private / 'state.json', state)
-        unlink_durable(self.private / 'pending.json')
-        self.publish()
-        return {'imported': True, 'initialized': True, 'last_success': None}
+    Construction fails for every host, real or injected, until C4 connects a new
+    actor; no state directory is created and no host operation is reachable.
+    """
+    def __init__(self, *_args, **_kwargs):
+        # Refuse first: no config validation or adapter lookup can make the
+        # refusal depend on input or on bundle state.
+        raise SyncError('runtime_actor_not_connected')
 
 
 @contextlib.contextmanager
-def exclusive_lock(inherited=None):
+def exclusive_lock(inherited=None, *, create=True, shared=False):
+    # shared=True (inspect-state/inspect-runtime) takes LOCK_SH only on a
+    # descriptor opened here, so inspections and the integrity guardian
+    # (LOCK_SH) coexist while a deployment or verify-cohort (LOCK_EX) excludes
+    # them. An inherited --lock-fd is always LOCK_EX: flock locks the open file
+    # description, so LOCK_SH on the deployer's descriptor would downgrade its
+    # exclusive lock.
     # Ubuntu uses a root-owned sticky /run/lock (1777). Its sticky bit
     # protects the root-owned lock from replacement by other users. Other
     # writable parents remain forbidden.
@@ -960,87 +470,178 @@ def exclusive_lock(inherited=None):
     else:
         check_path(LOCK.parent, directory=True)
     if inherited is None:
-        fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        # Flags stay literal at each call: the static test allowlists exactly
+        # this one creating open (verify-cohort) and requires every other
+        # os.open reachable from main() to be provably read-only. The
+        # read-only open is O_NONBLOCK (as the guardian's): a FIFO at the
+        # lock path would otherwise block it until a writer appears; it is
+        # then refused by the file-type check below (sync_failed).
+        fd=(os.open(LOCK,os.O_RDWR|os.O_NOFOLLOW|os.O_CREAT,0o600) if create
+            else os.open(LOCK,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK))
     else:
         fd = inherited
+    def is_lock_file(st, lst):
+        # The descriptor is the root-owned 0600 single-link regular file that
+        # LOCK names right now (same device, inode, file type and owner). The
+        # mode is exactly 0600, as the guardian requires (existing_shared_lock):
+        # 0400, 0700 or a set-id bit is refused too.
+        return (stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and not stat.S_ISLNK(lst.st_mode) and st.st_uid == 0
+                and stat.S_IMODE(st.st_mode) == 0o600 and (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), st.st_uid)
+                == (lst.st_dev, lst.st_ino, stat.S_IFMT(lst.st_mode), lst.st_uid))
     try:
-        st = os.fstat(fd)
-        lst = LOCK.lstat()
-        if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(lst.st_mode) or st.st_uid != 0 or st.st_mode & 0o077 or (st.st_dev, st.st_ino) != (lst.st_dev, lst.st_ino):
+        if not is_lock_file(os.fstat(fd), LOCK.lstat()):
             raise SyncError('invalid lock descriptor')
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, (fcntl.LOCK_SH if shared and inherited is None else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise SyncError('another sync or deployment holds the lock') from exc
+        if inherited is None:
+            # A lock opened here may have been unlinked (and recreated) between
+            # the open and the flock: the flock then guards an orphaned inode
+            # that no other locker can see. Check the path again now that the
+            # lock is held; on a mismatch the finally closes (unlocks) the fd.
+            # An inherited --lock-fd is the caller's: it is checked against the
+            # path once, above, and its lifetime is the caller's to guard.
+            try:
+                replaced = not is_lock_file(os.fstat(fd), LOCK.lstat())
+            except OSError as exc:
+                raise SyncError('lock file replaced while locking') from exc
+            if replaced:
+                raise SyncError('lock file replaced while locking')
         yield
     finally:
         if inherited is None:
             os.close(fd)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', default=str(CONFIG))
-    parser.add_argument('--lock-fd', type=int)
+class ArgumentRejected(Exception):
+    """An argv error. Carries no text: argparse messages quote argv values."""
+
+
+class FixedErrorParser(argparse.ArgumentParser):
+    """argparse whose errors never reach stderr; main() prints a fixed code."""
+
+    def error(self, message):
+        raise ArgumentRejected()
+
+
+def build_parser():
+    # The full command set stays in --help (the S0 verifier discovers it there),
+    # but only the read-only subparsers are ever used to parse argv. No parser
+    # has a help action (add_help=False), so parsing can never exit; main()
+    # prints the usage itself for a sole -h/--help.
+    parser = FixedErrorParser(description=__doc__, allow_abbrev=False, add_help=False)
+    for name, options in GLOBAL_OPTIONS:
+        parser.add_argument(name, **options)
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ['preflight', 'plan', 'sync']:
-        sub.add_parser(name)
-    for name in ['apply', 'import']:
-        p = sub.add_parser(name)
-        p.add_argument('--approve', required=True)
-    p = sub.add_parser('import-plan')
-    p.add_argument('--legacy-state', required=True)
-    args = parser.parse_args(argv)
-    engine = None
+    for name in sorted(READ_ONLY_COMMANDS | REFUSED_COMMANDS):
+        sub.add_parser(name, allow_abbrev=False, add_help=False)
+    return parser
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) == 1 and argv[0] in HELP_OPTIONS:
+        build_parser().print_help()
+        return 0
+    if any(token in REFUSED_COMMANDS for token in argv):
+        # S0 authenticates a cohort, not true-kernel/P/T transaction safety.
+        # Refuse before argparse, root/config-path checks, the lock (O_CREAT),
+        # the bundle bootstrap and the config read, so a refused command
+        # touches nothing and its arguments are never parsed or echoed.
+        # C4 must connect a newly reviewed actor here instead of removing this.
+        print(canonical({'error': 'runtime_actor_not_connected'}), file=sys.stderr)
+        return 1
+    if not any(token in READ_ONLY_COMMANDS for token in argv):
+        # No read-only command name at all (unknown, missing or option-like
+        # tokens only): fixed code, argv never parsed.
+        print(canonical({'error': 'unknown_command'}), file=sys.stderr)
+        return 2
+    try:
+        # -h/--help anywhere but alone is an argument error, never usage.
+        if any(token in HELP_OPTIONS for token in argv):
+            raise ArgumentRejected()
+        # argparse alone decides which read-only command argv selects.
+        args = build_parser().parse_args(argv)
+        if args.command not in READ_ONLY_COMMANDS:
+            raise ArgumentRejected()
+    except ArgumentRejected:
+        print(canonical({'error': 'invalid_arguments'}), file=sys.stderr)
+        return 2
     try:
         if os.geteuid() != 0:
             raise SyncError('root is required')
         if Path(args.config) != CONFIG:
             raise SyncError('only the fixed config path is permitted')
-        check_path(CONFIG)
-        config = validate_config(json_read(CONFIG, secure=False))
-        with exclusive_lock(args.lock_fd):
-            STATE_DIR.mkdir(mode=0o755, exist_ok=True)
-            check_path(STATE_DIR, directory=True)
-            private = STATE_DIR / 'private'
-            private.mkdir(mode=0o700, exist_ok=True)
-            check_path(private, directory=True)
-            if private.stat().st_mode & 0o077:
-                raise SyncError('state directory must be private')
-            for file in private.iterdir():
-                check_path(file, writable=True)
-            engine = Engine(config)
-            if args.command == 'preflight':
-                engine.preflight()
-                result = {'preflight': 'ok', 'initialized': bool(engine.state())}
-            elif args.command == 'plan':
-                result = engine.plan()
-            elif args.command == 'sync':
-                result = engine.sync()
-            elif args.command == 'apply':
-                result = engine.apply(args.approve)
-            elif args.command == 'import-plan':
-                legacy = Path(args.legacy_state)
-                if not legacy.is_absolute():
-                    raise SyncError('legacy evidence requires absolute path')
-                check_path(legacy)
-                result = engine.import_plan(legacy)
-            else:
-                result = engine.import_state(args.approve)
-            print(canonical(result))
-        return 0
-    except ApprovalRequired:
-        print(canonical({'error': 'approval_required'}))
-        return 2
+        lock=(exclusive_lock(args.lock_fd,create=False,shared=True) if args.command in ('inspect-state','inspect-runtime')
+              else exclusive_lock(args.lock_fd))
+        with lock:
+            modules = _bundle_runtime()
+            config = validate_config(_bundle_config())
+            if args.command == 'verify-cohort':
+                print(canonical({'generation_id':BUNDLE_GENERATION_ID,'cohort_verified':True,
+                                 'runtime_ready':False,'policy_verified':False}))
+                return 0
+            # Both inspections read the private state exactly once.
+            module=modules['cloudfront_snapshot']
+            evidence=module.read_private_state('/var/lib/cloudfront-sync/private',owner=0,group=0)
+            # A missing state/journal is 'absent' only when the reader knows
+            # the file does not exist (state_files_read: directory absent, or
+            # every file read); when it stopped at the listing (unknown
+            # entries) the files were never read: 'not_read'.
+            unparsed='absent' if evidence.state_files_read is True else 'not_read'
+            if args.command == 'inspect-state':
+                print(canonical({'generation_id':BUNDLE_GENERATION_ID,'inspection':'read_only_state_only',
+                                 'private_state_disposition':evidence.disposition,
+                                 'state_disposition':evidence.state.disposition if evidence.state else unparsed,
+                                 'journal_disposition':evidence.journal.disposition if evidence.journal else unparsed,
+                                 'runtime_ready':False}))
+                return 0
+            if args.command == 'inspect-runtime':
+                snapshot=module.Snapshotter(backend=config['firewall']['backend'],
+                                            nginx_enabled=config['nginx']['enabled'],
+                                            nginx_shared_dir=config['nginx']['shared_dir'],
+                                            nginx_bundles=config['nginx']['bundles']).collect()
+                state=evidence.state
+                # The state's baseline is the admission baseline only when the
+                # whole private namespace is data-only (no journal, pending or
+                # companion entry next to the state); any other disposition is
+                # manual and admits nothing. The config hash is compared only
+                # with that baseline; without one it is neither computed nor
+                # passed.
+                data_state=(state if evidence.disposition=='pt_state_data_only' and state is not None
+                            and state.disposition=='pt_state_data_only' else None)
+                admission=module.admit_snapshot(snapshot,data_state.baseline if data_state else None,
+                    config_hash=snapshot_config_hash(module,config) if data_state else None,
+                    enrollment_id=data_state.enrollment_id if data_state else None,owner=0)
+                try:
+                    context=module.ContextCollector(backend=config['firewall']['backend']).collect()
+                    if type(context) is module.NotApplicable:
+                        context_status={'status':'not_applicable','component':'context'}
+                    else:
+                        context_status={'status':'observed_unverified','stable_raw':context.stable_raw}
+                except Exception:
+                    context_status={'status':'failure','code':'context_observation_failed'}
+                def public_component(value):
+                    if type(value) is module.NotApplicable:
+                        return {'status':'not_applicable','component':value.component}
+                    if type(value) is module.ComponentResult:
+                        return {'status':value.status,'code':value.code}
+                    raise SyncError('invalid readonly component result')
+                print(canonical({'generation_id':BUNDLE_GENERATION_ID,'inspection':'read_only_observation',
+                                 'private_state':evidence.disposition,
+                                 'state':state.disposition if state else unparsed,
+                                 'journal':evidence.journal.disposition if evidence.journal else unparsed,
+                                 'firewall':public_component(admission.firewall),
+                                 'nginx':public_component(admission.nginx),
+                                 'context':context_status,'runtime_ready':False}))
+                return 0
+            # Unreachable while READ_ONLY_COMMANDS matches the branches above;
+            # fails closed (sanitized) if they ever diverge.
+            raise SyncError('unclassified_read_only_command')
     except Exception:
         # Exception chains can include headers, configuration, and subprocess
         # output. Only a fixed code reaches stdout/stderr or service logs.
-        if engine:
-            try:
-                status = engine.status()
-                engine.publish(approval=status.get('approval_required', False), recovery=status.get('recovery_failed', False), error=status.get('error_code') or 'sync_failed')
-            except Exception:
-                pass
         print(canonical({'error': 'sync_failed'}), file=sys.stderr)
         return 1
 

@@ -1,0 +1,73 @@
+*filter
+:ufw-user-input - [0:0]
+:ufw-user-output - [0:0]
+:ufw-user-forward - [0:0]
+:ufw-before-logging-input - [0:0]
+:ufw-before-logging-output - [0:0]
+:ufw-before-logging-forward - [0:0]
+:ufw-user-logging-input - [0:0]
+:ufw-user-logging-output - [0:0]
+:ufw-user-logging-forward - [0:0]
+:ufw-after-logging-input - [0:0]
+:ufw-after-logging-output - [0:0]
+:ufw-after-logging-forward - [0:0]
+:ufw-logging-deny - [0:0]
+:ufw-logging-allow - [0:0]
+:ufw-user-limit - [0:0]
+:ufw-user-limit-accept - [0:0]
+### RULES ###
+
+### tuple ### allow any any 0.0.0.0/0 any 203.0.113.70 in comment=666978747572652d616e792d6e6f706f7274
+-A ufw-user-input -s 203.0.113.70 -j ACCEPT
+
+### tuple ### allow any 9080 0.0.0.0/0 any 203.0.113.71 in comment=666978747572652d616e792d706f7274
+-A ufw-user-input -p tcp --dport 9080 -s 203.0.113.71 -j ACCEPT
+-A ufw-user-input -p udp --dport 9080 -s 203.0.113.71 -j ACCEPT
+
+### tuple ### reject tcp 9081 0.0.0.0/0 any 203.0.113.72 in comment=666978747572652d72656a6563742d746370
+-A ufw-user-input -p tcp --dport 9081 -s 203.0.113.72 -j REJECT --reject-with tcp-reset
+
+### tuple ### allow_log-all tcp 9082 0.0.0.0/0 any 203.0.113.73 in comment=666978747572652d6c6f67616c6c
+-A ufw-user-logging-input -p tcp --dport 9082 -s 203.0.113.73 -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW ALLOW] "
+-A ufw-user-logging-input -p tcp --dport 9082 -s 203.0.113.73 -j RETURN
+-A ufw-user-input -p tcp --dport 9082 -s 203.0.113.73 -j ufw-user-logging-input
+-A ufw-user-input -p tcp --dport 9082 -s 203.0.113.73 -j ACCEPT
+
+### tuple ### limit_log tcp 9083 0.0.0.0/0 any 203.0.113.74 in comment=666978747572652d6c696d69742d6c6f67
+-A ufw-user-logging-input -p tcp --dport 9083 -s 203.0.113.74 -m conntrack --ctstate NEW -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW LIMIT] "
+-A ufw-user-logging-input -p tcp --dport 9083 -s 203.0.113.74 -j RETURN
+-A ufw-user-input -p tcp --dport 9083 -s 203.0.113.74 -j ufw-user-logging-input
+-A ufw-user-input -p tcp --dport 9083 -s 203.0.113.74 -m conntrack --ctstate NEW -m recent --set
+-A ufw-user-input -p tcp --dport 9083 -s 203.0.113.74 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 -j ufw-user-limit
+-A ufw-user-input -p tcp --dport 9083 -s 203.0.113.74 -j ufw-user-limit-accept
+
+### tuple ### allow tcp 9084,9085 0.0.0.0/0 1100,1101 203.0.113.75 in comment=666978747572652d626f74682d6d756c7469
+-A ufw-user-input -p tcp -m multiport --dports 9084,9085 -m multiport --sports 1100,1101 -s 203.0.113.75 -j ACCEPT
+
+### tuple ### allow tcp 9086 0.0.0.0/0 1102 203.0.113.76 in comment=666978747572652d686f73743332
+-A ufw-user-input -p tcp --dport 9086 -s 203.0.113.76 --sport 1102 -j ACCEPT
+
+### tuple ### allow tcp 8086,8087 0.0.0.0/0 any 0.0.0.0/0 CloudFront%20Multi%20App - in
+-A ufw-user-input -p tcp -m multiport --dports 8086,8087 -j ACCEPT -m comment --comment 'dapp_CloudFront%20Multi%20App'
+
+### tuple ### allow udp 5354 0.0.0.0/0 any 0.0.0.0/0 CloudFront%20Multi%20App - in
+-A ufw-user-input -p udp --dport 5354 -j ACCEPT -m comment --comment 'dapp_CloudFront%20Multi%20App'
+
+### tuple ### limit tcp 22 0.0.0.0/0 any 0.0.0.0/0 in comment=666978747572652d7373682d6c696d6974
+-A ufw-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set
+-A ufw-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 -j ufw-user-limit
+-A ufw-user-input -p tcp --dport 22 -j ufw-user-limit-accept
+
+### END RULES ###
+
+### LOGGING ###
+-I ufw-user-logging-input -j RETURN
+-I ufw-user-logging-output -j RETURN
+-I ufw-user-logging-forward -j RETURN
+### END LOGGING ###
+
+### RATE LIMITING ###
+-A ufw-user-limit -j REJECT
+-A ufw-user-limit-accept -j ACCEPT
+### END RATE LIMITING ###
+COMMIT

@@ -28,6 +28,44 @@ def parameters():
     }
 
 
+ROLE = SOURCE.parents[1]
+
+
+def role_validation_payload():
+    """The exact stdin the role's --validate-only task sends, rendered by ansible-core.
+
+    tasks/main.yml is evaluated with ansible-core's own Templar, lookups and
+    ``to_json`` filter (as ansible/tests/test_k3s_rdp_manifest.py does), not a
+    hand-written Jinja evaluator. ansible-core is installed in the CI static job
+    before these unit tests run (.github/workflows/ansible-roles.yml); without it
+    this test errors instead of skipping.
+    """
+    import yaml
+    from ansible.parsing.dataloader import DataLoader
+    from ansible.plugins.loader import init_plugin_loader
+    # ansible-core >= 2.19 (data tagging) templates only trusted strings.
+    from ansible.template import Templar, trust_as_template
+    init_plugin_loader()
+    tasks = yaml.safe_load((ROLE / 'tasks/main.yml').read_text())
+    block = next(task for task in tasks if 'block' in task)
+    validate = next(task for task in block['block'] if 'Validate inputs' in task['name'])
+    command = validate['ansible.builtin.command']
+    if command['stdin'] != '{{ _cloudfront_sync_parameters | to_json }}' or '--validate-only' not in command['argv']:
+        raise AssertionError('role validation task no longer sends _cloudfront_sync_parameters')
+    def trusted(value):
+        # Only the role's own task source is trusted as a template.
+        if isinstance(value, dict):
+            return {key: trusted(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [trusted(item) for item in value]
+        return trust_as_template(value) if isinstance(value, str) else value
+    variables = dict(yaml.safe_load((ROLE / 'defaults/main.yml').read_text()),
+                     cloudfront_sync_host_address='192.0.2.10', role_path=str(ROLE),
+                     _cloudfront_sync_parameters=trusted(block['vars']['_cloudfront_sync_parameters']))
+    rendered = Templar(loader=DataLoader(), variables=variables).template(trust_as_template(command['stdin']))
+    return json.loads(rendered)
+
+
 class FakeRun:
     def __init__(self):
         self.calls = []
@@ -458,40 +496,52 @@ class CliTests(unittest.TestCase):
     def run_cli(self, data, *args, root=True):
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.object(module.sys, 'argv', ['install-cloudfront-sync', *args]), \
-             patch.object(module.sys, 'stdin', io.StringIO(data)), \
+             patch.object(module.sys, 'stdin', io.TextIOWrapper(io.BytesIO(data.encode()),encoding='utf-8')), \
              patch.object(module.os, 'geteuid', return_value=0 if root else 123), \
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = module.main()
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_validate_only_does_not_require_root_or_invoke_installer(self):
-        with patch.object(module.Installer, 'install', side_effect=AssertionError('must not run')):
-            code, out, err = self.run_cli(json.dumps(parameters()), '--validate-only', root=False)
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {'valid': True})
-        self.assertEqual(err, '')
+    # main() maps every Exception to one generic code, so a raising tripwire
+    # would be swallowed: the installer actor is a recording mock instead.
+    def test_legacy_payload_rejected_without_invoking_installer(self):
+        with patch.object(module.Installer,'install') as installed:
+            code,out,err=self.run_cli(json.dumps(parameters()),'--validate-only',root=False)
+        installed.assert_not_called()
+        self.assertEqual(code,1);self.assertEqual(out,'')
+        self.assertEqual(json.loads(err),{'error':'candidate_validation_or_installation_unavailable'})
 
-    def test_root_required_and_malformed_or_oversized_payload_rejected(self):
-        code, _, err = self.run_cli(json.dumps(parameters()), root=False)
-        self.assertEqual(code, 1)
-        self.assertIn('requires root', err)
-        for raw in ('not json', 'x' * 8_000_001):
-            code, out, err = self.run_cli(raw)
-            self.assertEqual(code, 1)
-            self.assertEqual(out, '')
-            self.assertIsInstance(json.loads(err)['error'], str)
+    def test_malformed_or_oversized_payload_rejected(self):
+        for raw in ('not json','x'*(16*1024*1024+1)):
+            code,out,err=self.run_cli(raw)
+            self.assertEqual(code,1);self.assertEqual(out,'')
+            self.assertEqual(json.loads(err),{'error':'candidate_validation_or_installation_unavailable'})
 
-    def test_success_and_sanitized_installer_failure(self):
-        with patch.object(module.Installer, 'install', return_value={'changed': False}):
-            code, out, err = self.run_cli(json.dumps(parameters()))
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {'changed': False})
-        self.assertEqual(err, '')
-        with patch.object(module.Installer, 'install', side_effect=module.InstallError('timer recovery failed')):
-            code, out, err = self.run_cli(json.dumps(parameters()))
-        self.assertEqual(code, 1)
-        self.assertEqual(out, '')
-        self.assertEqual(json.loads(err)['error'], 'timer recovery failed')
+    def test_role_generated_payload_is_rejected_as_old_candidate_schema(self):
+        """The role (tasks/main.yml) still sends the pre-C4 4-asset payload without
+        ``version``; validate_candidate refuses it as invalid_candidate_schema, and
+        main() collapses that into the generic code molecule's converge observes."""
+        payload = role_validation_payload()
+        self.assertEqual(set(payload), {'config', 'timer_enabled', 'approve_token', 'assets'})
+        self.assertEqual(payload['config']['host_address'], '192.0.2.10')
+        self.assertEqual(payload['config']['firewall']['ports'], [443])
+        self.assertIs(payload['timer_enabled'], False)
+        self.assertEqual(payload['assets']['engine'], (ROLE / 'files/cloudfront-sync.py').read_text().rstrip('\n'))
+        raw = json.dumps(payload).encode('utf-8')
+        with patch.object(module.Installer,'install') as installed:
+            with self.assertRaisesRegex(module.InstallError, '^invalid_candidate_schema$'):
+                module.validate_candidate(raw)
+            code,out,err=self.run_cli(raw.decode('utf-8'),'--validate-only')
+        installed.assert_not_called()
+        self.assertEqual(code,1);self.assertEqual(out,'')
+        self.assertEqual(json.loads(err),{'error':'candidate_validation_or_installation_unavailable'})
+
+    def test_c3_mutation_closed_even_after_successful_candidate_validation(self):
+        with patch.object(module,'validate_candidate',return_value=object()),patch.object(module.Installer,'install') as installed:
+            code,out,err=self.run_cli('{}')
+        installed.assert_not_called()
+        self.assertEqual(code,1);self.assertEqual(out,'')
+        self.assertEqual(json.loads(err),{'error':'cohort_installer_unavailable'})
 
 
 if __name__ == '__main__':

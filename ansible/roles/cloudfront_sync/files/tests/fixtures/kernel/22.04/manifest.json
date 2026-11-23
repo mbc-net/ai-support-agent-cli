@@ -1,0 +1,655 @@
+{
+  "schema": 1,
+  "fixture_only": true,
+  "os": "22.04",
+  "ufw_version": "0.36.1-4ubuntu0.1",
+  "initial_commands": [
+    [
+      "limit",
+      "22/tcp",
+      "comment",
+      "fixture-ssh-limit"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.8",
+      "to",
+      "any",
+      "port",
+      "22",
+      "comment",
+      "fixture-admin"
+    ],
+    [
+      "deny",
+      "proto",
+      "tcp",
+      "from",
+      "198.51.100.0/24",
+      "to",
+      "any",
+      "port",
+      "8443",
+      "comment",
+      "fixture-deny"
+    ],
+    [
+      "reject",
+      "proto",
+      "udp",
+      "from",
+      "198.51.100.0/24",
+      "to",
+      "any",
+      "port",
+      "9443",
+      "comment",
+      "fixture-reject"
+    ],
+    [
+      "allow",
+      "log",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.0/24",
+      "to",
+      "any",
+      "port",
+      "80,443",
+      "comment",
+      "fixture-multi-log"
+    ],
+    [
+      "route",
+      "allow",
+      "in",
+      "on",
+      "eth0",
+      "out",
+      "on",
+      "eth1",
+      "proto",
+      "tcp",
+      "from",
+      "198.51.100.0/24",
+      "to",
+      "203.0.113.0/24",
+      "port",
+      "8080",
+      "comment",
+      "fixture-route"
+    ],
+    [
+      "allow",
+      "in",
+      "on",
+      "lo",
+      "proto",
+      "udp",
+      "from",
+      "any",
+      "to",
+      "any",
+      "port",
+      "5353",
+      "comment",
+      "fixture-interface"
+    ],
+    [
+      "allow",
+      "CloudFront Fixture App"
+    ],
+    [
+      "allow",
+      "out",
+      "on",
+      "eth0",
+      "proto",
+      "udp",
+      "from",
+      "any",
+      "to",
+      "any",
+      "port",
+      "53",
+      "comment",
+      "fixture-outbound"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "2001:db8:1::/64",
+      "to",
+      "any",
+      "port",
+      "8443",
+      "comment",
+      "fixture-ipv6"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "192.0.2.0/28",
+      "to",
+      "any",
+      "port",
+      "443",
+      "comment",
+      "cloudfront-sync"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "2001:db8:cf::/64",
+      "to",
+      "any",
+      "port",
+      "443",
+      "comment",
+      "cloudfront-sync"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.99",
+      "to",
+      "any",
+      "port",
+      "9000",
+      "comment",
+      "fixture-tail"
+    ]
+  ],
+  "states": [
+    {
+      "name": "before",
+      "files": {
+        "user.rules": {
+          "file": "before.user.rules",
+          "sha256": "2a098865947854d3d72ca07226d08206dee12f9ac207d0accdcad433ce0aba2a",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "before.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      },
+      "kernel_views": {
+        "iptables-save": {
+          "file": "before.iptables-save",
+          "sha256": "0ebfba1e499b84695d4306fb6991bceadd977d07463f0702c9e7d899e1bf24c4"
+        },
+        "ip6tables-save": {
+          "file": "before.ip6tables-save",
+          "sha256": "bfb22afc7c3851a6b032bcc08bc3bba2e2874b37757a00d2e35c3f5a728a1f17"
+        },
+        "iptables-legacy-save": {
+          "file": "before.iptables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "ip6tables-legacy-save": {
+          "file": "before.ip6tables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "nft": {
+          "file": "before.native.json",
+          "sha256": "1fb92df7aa838e2115062f1ca0189e23da902e593d80935238a991a1e0c6b3e5"
+        }
+      }
+    },
+    {
+      "name": "after_add4",
+      "files": {
+        "user.rules": {
+          "file": "after_add4.user.rules",
+          "sha256": "53c78f29be62f78a94b24d8d63374652038df4008a8f2469a48ff47ce2c32559",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_add4.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      },
+      "kernel_views": {
+        "iptables-save": {
+          "file": "after_add4.iptables-save",
+          "sha256": "c5dbf14eca8a582a135c894e3a2eeaaff6d3f97d3f2b9620abec662c448ebd5c"
+        },
+        "ip6tables-save": {
+          "file": "after_add4.ip6tables-save",
+          "sha256": "bfb22afc7c3851a6b032bcc08bc3bba2e2874b37757a00d2e35c3f5a728a1f17"
+        },
+        "iptables-legacy-save": {
+          "file": "after_add4.iptables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "ip6tables-legacy-save": {
+          "file": "after_add4.ip6tables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "nft": {
+          "file": "after_add4.native.json",
+          "sha256": "1ef0c3ad76b856ac9c911ce5a49dfdf8471f8af39e0a2821268df32cd631a142"
+        }
+      }
+    },
+    {
+      "name": "after_add6",
+      "files": {
+        "user.rules": {
+          "file": "after_add6.user.rules",
+          "sha256": "53c78f29be62f78a94b24d8d63374652038df4008a8f2469a48ff47ce2c32559",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_add6.user6.rules",
+          "sha256": "20191bd088b14eac2d4afcc63f03fc692ba15a8378f8a9126e609466ec8ad0ab",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      },
+      "kernel_views": {
+        "iptables-save": {
+          "file": "after_add6.iptables-save",
+          "sha256": "c5dbf14eca8a582a135c894e3a2eeaaff6d3f97d3f2b9620abec662c448ebd5c"
+        },
+        "ip6tables-save": {
+          "file": "after_add6.ip6tables-save",
+          "sha256": "903f865c5fee230520ba0abab27368c3b34aa03d7b2d60d69be824f35dbb6d0e"
+        },
+        "iptables-legacy-save": {
+          "file": "after_add6.iptables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "ip6tables-legacy-save": {
+          "file": "after_add6.ip6tables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "nft": {
+          "file": "after_add6.native.json",
+          "sha256": "8133e38c95bbecffd438b611e18c5fc797fc234662f47b16c0886ff4da4ad9ac"
+        }
+      }
+    },
+    {
+      "name": "after_delete4",
+      "files": {
+        "user.rules": {
+          "file": "after_delete4.user.rules",
+          "sha256": "f4d6f904605648c92d08e666b087ba94216cf1e542ba1ba89962f8610162a184",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_delete4.user6.rules",
+          "sha256": "20191bd088b14eac2d4afcc63f03fc692ba15a8378f8a9126e609466ec8ad0ab",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      },
+      "kernel_views": {
+        "iptables-save": {
+          "file": "after_delete4.iptables-save",
+          "sha256": "41eb043a672b5557150c7052ae72627f6c4f3c73d8947b47fa4a18c21c123779"
+        },
+        "ip6tables-save": {
+          "file": "after_delete4.ip6tables-save",
+          "sha256": "e230f704b234786d13693b06a5f8b18e3018b2b5936bf3e72770ed4a9e360ab4"
+        },
+        "iptables-legacy-save": {
+          "file": "after_delete4.iptables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "ip6tables-legacy-save": {
+          "file": "after_delete4.ip6tables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "nft": {
+          "file": "after_delete4.native.json",
+          "sha256": "0ea349b41db549939dddd4af3fdd14b97062d70ecd7b847fda8769bf588d73f8"
+        }
+      }
+    },
+    {
+      "name": "after_restore4",
+      "files": {
+        "user.rules": {
+          "file": "after_restore4.user.rules",
+          "sha256": "53c78f29be62f78a94b24d8d63374652038df4008a8f2469a48ff47ce2c32559",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_restore4.user6.rules",
+          "sha256": "20191bd088b14eac2d4afcc63f03fc692ba15a8378f8a9126e609466ec8ad0ab",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      },
+      "kernel_views": {
+        "iptables-save": {
+          "file": "after_restore4.iptables-save",
+          "sha256": "58c59724cfafee1990186bc72c64b00c9d0e409f740ce79f2c372d15f3a81428"
+        },
+        "ip6tables-save": {
+          "file": "after_restore4.ip6tables-save",
+          "sha256": "e230f704b234786d13693b06a5f8b18e3018b2b5936bf3e72770ed4a9e360ab4"
+        },
+        "iptables-legacy-save": {
+          "file": "after_restore4.iptables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "ip6tables-legacy-save": {
+          "file": "after_restore4.ip6tables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "nft": {
+          "file": "after_restore4.native.json",
+          "sha256": "b6fac22440a5e3bcee705c5c83a1132f92fcd9d797538da12954df685fcfa941"
+        }
+      }
+    },
+    {
+      "name": "after_delete6",
+      "files": {
+        "user.rules": {
+          "file": "after_delete6.user.rules",
+          "sha256": "53c78f29be62f78a94b24d8d63374652038df4008a8f2469a48ff47ce2c32559",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_delete6.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      },
+      "kernel_views": {
+        "iptables-save": {
+          "file": "after_delete6.iptables-save",
+          "sha256": "58c59724cfafee1990186bc72c64b00c9d0e409f740ce79f2c372d15f3a81428"
+        },
+        "ip6tables-save": {
+          "file": "after_delete6.ip6tables-save",
+          "sha256": "8b04dfe9b946e2a2a67ce956ddd6436c2b940bb51503287e2b15a71903fd0add"
+        },
+        "iptables-legacy-save": {
+          "file": "after_delete6.iptables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "ip6tables-legacy-save": {
+          "file": "after_delete6.ip6tables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "nft": {
+          "file": "after_delete6.native.json",
+          "sha256": "7a414f977ecdd027c18c65077b5c44644c5221aacf362d7733e29ae52f9a540e"
+        }
+      }
+    },
+    {
+      "name": "after_rollback",
+      "files": {
+        "user.rules": {
+          "file": "after_rollback.user.rules",
+          "sha256": "2a098865947854d3d72ca07226d08206dee12f9ac207d0accdcad433ce0aba2a",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_rollback.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      },
+      "kernel_views": {
+        "iptables-save": {
+          "file": "after_rollback.iptables-save",
+          "sha256": "abc043eb4f65f11365285b531cb3ea6f1ffce20c72fafa6ef0286b7c107bde96"
+        },
+        "ip6tables-save": {
+          "file": "after_rollback.ip6tables-save",
+          "sha256": "8b04dfe9b946e2a2a67ce956ddd6436c2b940bb51503287e2b15a71903fd0add"
+        },
+        "iptables-legacy-save": {
+          "file": "after_rollback.iptables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "ip6tables-legacy-save": {
+          "file": "after_rollback.ip6tables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "nft": {
+          "file": "after_rollback.native.json",
+          "sha256": "2a015bd3002cefd47211bbcbef6628602b968d4a322dff683b2618158e69bb47"
+        }
+      }
+    },
+    {
+      "name": "after_noop",
+      "files": {
+        "user.rules": {
+          "file": "after_noop.user.rules",
+          "sha256": "2a098865947854d3d72ca07226d08206dee12f9ac207d0accdcad433ce0aba2a",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_noop.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      },
+      "kernel_views": {
+        "iptables-save": {
+          "file": "after_noop.iptables-save",
+          "sha256": "abc043eb4f65f11365285b531cb3ea6f1ffce20c72fafa6ef0286b7c107bde96"
+        },
+        "ip6tables-save": {
+          "file": "after_noop.ip6tables-save",
+          "sha256": "8b04dfe9b946e2a2a67ce956ddd6436c2b940bb51503287e2b15a71903fd0add"
+        },
+        "iptables-legacy-save": {
+          "file": "after_noop.iptables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "ip6tables-legacy-save": {
+          "file": "after_noop.ip6tables-legacy-save",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "nft": {
+          "file": "after_noop.native.json",
+          "sha256": "2a015bd3002cefd47211bbcbef6628602b968d4a322dff683b2618158e69bb47"
+        }
+      }
+    }
+  ],
+  "operations": [
+    {
+      "after_state": "after_add4",
+      "argv": [
+        "ufw",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "198.18.0.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_add6",
+      "argv": [
+        "ufw",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "2001:db8:cf:1::/64",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_delete4",
+      "argv": [
+        "ufw",
+        "--force",
+        "delete",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "192.0.2.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_restore4",
+      "argv": [
+        "ufw",
+        "insert",
+        "10",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "192.0.2.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_delete6",
+      "argv": [
+        "ufw",
+        "--force",
+        "delete",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "2001:db8:cf:1::/64",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_rollback",
+      "argv": [
+        "ufw",
+        "--force",
+        "delete",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "198.18.0.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_noop",
+      "argv": [
+        "ufw",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "192.0.2.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    }
+  ],
+  "source_hashes": {
+    "write_rules": "76fbcef34ad3a0d5e484b03e1e4e80889a2dff1edff3515949fa138d5b9c5f57",
+    "format_rule": "4f01ae5d78d57f4656c903b8aaff31213b93d2d2ff4db8120c226244a2ab1a3b"
+  },
+  "protected_file_count": 11,
+  "real_enabled_ufw": true,
+  "rollback_exact_bytes": true,
+  "noop_exact_bytes": true,
+  "adapter_checks": {
+    "roundtrips": 16,
+    "transitions": 6,
+    "unchanged_family": 6,
+    "noop": 1
+  },
+  "adapter_sha256": "81e455a22b53e849840b163caebf9a147ff2e7828aeb47a61d0aa489bd85171c",
+  "prediction_before_cli": true,
+  "kernel_tool_versions": {
+    "iptables": "iptables v1.8.7 (nf_tables)",
+    "ip6tables": "ip6tables v1.8.7 (nf_tables)",
+    "nft": "nftables v1.0.2 (Lester Gooch)"
+  }
+}

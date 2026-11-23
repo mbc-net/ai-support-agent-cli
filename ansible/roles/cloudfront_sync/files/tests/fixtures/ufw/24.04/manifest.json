@@ -1,0 +1,474 @@
+{
+  "schema": 1,
+  "fixture_only": true,
+  "os": "24.04",
+  "ufw_version": "0.36.2-6",
+  "initial_commands": [
+    [
+      "limit",
+      "22/tcp",
+      "comment",
+      "fixture-ssh-limit"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.8",
+      "to",
+      "any",
+      "port",
+      "22",
+      "comment",
+      "fixture-admin"
+    ],
+    [
+      "deny",
+      "proto",
+      "tcp",
+      "from",
+      "198.51.100.0/24",
+      "to",
+      "any",
+      "port",
+      "8443",
+      "comment",
+      "fixture-deny"
+    ],
+    [
+      "reject",
+      "proto",
+      "udp",
+      "from",
+      "198.51.100.0/24",
+      "to",
+      "any",
+      "port",
+      "9443",
+      "comment",
+      "fixture-reject"
+    ],
+    [
+      "allow",
+      "log",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.0/24",
+      "to",
+      "any",
+      "port",
+      "80,443",
+      "comment",
+      "fixture-multi-log"
+    ],
+    [
+      "route",
+      "allow",
+      "in",
+      "on",
+      "eth0",
+      "out",
+      "on",
+      "eth1",
+      "proto",
+      "tcp",
+      "from",
+      "198.51.100.0/24",
+      "to",
+      "203.0.113.0/24",
+      "port",
+      "8080",
+      "comment",
+      "fixture-route"
+    ],
+    [
+      "allow",
+      "in",
+      "on",
+      "lo",
+      "proto",
+      "udp",
+      "from",
+      "any",
+      "to",
+      "any",
+      "port",
+      "5353",
+      "comment",
+      "fixture-interface"
+    ],
+    [
+      "allow",
+      "CloudFront Fixture App"
+    ],
+    [
+      "allow",
+      "out",
+      "on",
+      "eth0",
+      "proto",
+      "udp",
+      "from",
+      "any",
+      "to",
+      "any",
+      "port",
+      "53",
+      "comment",
+      "fixture-outbound"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "2001:db8:1::/64",
+      "to",
+      "any",
+      "port",
+      "8443",
+      "comment",
+      "fixture-ipv6"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "192.0.2.0/28",
+      "to",
+      "any",
+      "port",
+      "443",
+      "comment",
+      "cloudfront-sync"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "2001:db8:cf::/64",
+      "to",
+      "any",
+      "port",
+      "443",
+      "comment",
+      "cloudfront-sync"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.99",
+      "to",
+      "any",
+      "port",
+      "9000",
+      "comment",
+      "fixture-tail"
+    ]
+  ],
+  "states": [
+    {
+      "name": "before",
+      "files": {
+        "user.rules": {
+          "file": "before.user.rules",
+          "sha256": "2a098865947854d3d72ca07226d08206dee12f9ac207d0accdcad433ce0aba2a",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "before.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      }
+    },
+    {
+      "name": "after_add4",
+      "files": {
+        "user.rules": {
+          "file": "after_add4.user.rules",
+          "sha256": "53c78f29be62f78a94b24d8d63374652038df4008a8f2469a48ff47ce2c32559",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_add4.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      }
+    },
+    {
+      "name": "after_add6",
+      "files": {
+        "user.rules": {
+          "file": "after_add6.user.rules",
+          "sha256": "53c78f29be62f78a94b24d8d63374652038df4008a8f2469a48ff47ce2c32559",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_add6.user6.rules",
+          "sha256": "20191bd088b14eac2d4afcc63f03fc692ba15a8378f8a9126e609466ec8ad0ab",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      }
+    },
+    {
+      "name": "after_delete4",
+      "files": {
+        "user.rules": {
+          "file": "after_delete4.user.rules",
+          "sha256": "f4d6f904605648c92d08e666b087ba94216cf1e542ba1ba89962f8610162a184",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_delete4.user6.rules",
+          "sha256": "20191bd088b14eac2d4afcc63f03fc692ba15a8378f8a9126e609466ec8ad0ab",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      }
+    },
+    {
+      "name": "after_restore4",
+      "files": {
+        "user.rules": {
+          "file": "after_restore4.user.rules",
+          "sha256": "53c78f29be62f78a94b24d8d63374652038df4008a8f2469a48ff47ce2c32559",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_restore4.user6.rules",
+          "sha256": "20191bd088b14eac2d4afcc63f03fc692ba15a8378f8a9126e609466ec8ad0ab",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      }
+    },
+    {
+      "name": "after_delete6",
+      "files": {
+        "user.rules": {
+          "file": "after_delete6.user.rules",
+          "sha256": "53c78f29be62f78a94b24d8d63374652038df4008a8f2469a48ff47ce2c32559",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_delete6.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      }
+    },
+    {
+      "name": "after_rollback",
+      "files": {
+        "user.rules": {
+          "file": "after_rollback.user.rules",
+          "sha256": "2a098865947854d3d72ca07226d08206dee12f9ac207d0accdcad433ce0aba2a",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_rollback.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      }
+    },
+    {
+      "name": "after_noop",
+      "files": {
+        "user.rules": {
+          "file": "after_noop.user.rules",
+          "sha256": "2a098865947854d3d72ca07226d08206dee12f9ac207d0accdcad433ce0aba2a",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        },
+        "user6.rules": {
+          "file": "after_noop.user6.rules",
+          "sha256": "3cb99423dcfc0c6d621056efba4c5c9ff357b3497d140e70cff82b5cfbc5cb93",
+          "mode": 416,
+          "uid": 0,
+          "gid": 0
+        }
+      }
+    }
+  ],
+  "operations": [
+    {
+      "after_state": "after_add4",
+      "argv": [
+        "ufw",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "198.18.0.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_add6",
+      "argv": [
+        "ufw",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "2001:db8:cf:1::/64",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_delete4",
+      "argv": [
+        "ufw",
+        "--force",
+        "delete",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "192.0.2.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_restore4",
+      "argv": [
+        "ufw",
+        "insert",
+        "10",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "192.0.2.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_delete6",
+      "argv": [
+        "ufw",
+        "--force",
+        "delete",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "2001:db8:cf:1::/64",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_rollback",
+      "argv": [
+        "ufw",
+        "--force",
+        "delete",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "198.18.0.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    },
+    {
+      "after_state": "after_noop",
+      "argv": [
+        "ufw",
+        "allow",
+        "proto",
+        "tcp",
+        "from",
+        "192.0.2.0/28",
+        "to",
+        "any",
+        "port",
+        "443",
+        "comment",
+        "cloudfront-sync"
+      ]
+    }
+  ],
+  "source_hashes": {
+    "write_rules": "76fbcef34ad3a0d5e484b03e1e4e80889a2dff1edff3515949fa138d5b9c5f57",
+    "format_rule": "4f01ae5d78d57f4656c903b8aaff31213b93d2d2ff4db8120c226244a2ab1a3b"
+  },
+  "protected_file_count": 11,
+  "real_enabled_ufw": true,
+  "rollback_exact_bytes": true,
+  "noop_exact_bytes": true,
+  "adapter_checks": {
+    "roundtrips": 16,
+    "transitions": 6,
+    "unchanged_family": 6,
+    "noop": 1
+  },
+  "adapter_sha256": "81e455a22b53e849840b163caebf9a147ff2e7828aeb47a61d0aa489bd85171c",
+  "prediction_before_cli": true
+}

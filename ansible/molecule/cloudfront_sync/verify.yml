@@ -1,25 +1,116 @@
 ---
-- name: Verify actual UFW nginx and systemd transactions on a disposable host
+# Stage S0: the runtime actor is not connected. This verifier is read-only
+# against host policy (apart from the S1 nginx phase's staged and restored
+# nginx fixture, below): it proves that every non read-only CLI subcommand
+# refuses with runtime_actor_not_connected and that no command changes UFW,
+# nginx, the install targets or the kernel rulesets (legacy x_tables dumps
+# included), nor echoes the argv secret. /run is compared only in a limited
+# way: the top-level entries named cloudfront*, ufw*, nginx*, ssh*/sshd* and
+# xtables* (presence and lstat identity); nothing else in /run is compared
+# (see s0_refusal_verify.run_snapshot). Every staged fixture is removed again by the verifier itself, and
+# its private work directory is created fresh for each run and removed in an
+# always section (success or failure), so verify is repeatable and leaves
+# nothing behind. The destructive real UFW/nginx forward, rollback and
+# crash-recovery checks are rebuilt against the new actor in stage S6.
+# Stage S1 (nginx_phase in the report): with nginx enabled for a staged
+# fixture under /etc/common-sv/nginx (included from /etc/nginx/conf.d and
+# reloaded; its localhost ports must be unused before), inspect-runtime admits
+# the nginx policy, reports real_ip_recursive on as nginx_policy_unsupported
+# and a symlinked bundle as nginx_observation_failed, and with nginx stopped
+# reports nginx_policy_unsupported after its sandbox demonstrably ran. Right
+# after verify-cohort, each inspect-runtime and each refused subcommand (run
+# again in every argv shape with the nginx-enabled config) the host
+# (install targets, lock, state directory, fixture, policy trees, kernel
+# rulesets) must equal a baseline taken after staging, nginx must not have
+# been reloaded, restarted or signalled, and no new transient run-*.service
+# unit may remain (also checked in cleanup). The bundle and argv secrets reach
+# no output, no file under the state directory, /var/log/nginx, /tmp,
+# /var/tmp, the install targets, the lock or the watched /run entries, and no
+# journal entry. The fixture is removed, nginx is restored (not when a fixture
+# path could not be removed) and the host is compared again (see
+# s0_refusal_verify.py).
+- name: Verify the S0 runtime-actor refusal state on a disposable host
   hosts: all
   become: true
   gather_facts: false
+  vars:
+    cloudfront_sync_s0_workdir: /root/cloudfront-sync-s0-verify
+    cloudfront_sync_s0_role_files: "{{ playbook_dir }}/../../roles/cloudfront_sync/files"
   tasks:
-    - name: Copy isolated transaction verifier
-      ansible.builtin.copy:
-        src: "{{ playbook_dir }}/live_verify.py"
-        dest: /var/lib/cloudfront-sync/private/live_verify.py
-        owner: root
-        group: root
-        mode: "0600"
+    - name: Run the S0 refusal verifier from a fresh private work directory
+      block:
+        - name: Remove a work directory an interrupted earlier run left behind
+          ansible.builtin.file:
+            path: "{{ cloudfront_sync_s0_workdir }}"
+            state: absent
 
-    - name: Exercise real daemon and firewall rollback paths
-      ansible.builtin.command:
-        argv: [/usr/bin/python3, /var/lib/cloudfront-sync/private/live_verify.py]
-      register: cloudfront_sync_live_result
-      changed_when: true
+        - name: Create the private verifier work directory outside runtime paths
+          ansible.builtin.file:
+            path: "{{ cloudfront_sync_s0_workdir }}/role-files"
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
 
-    - name: Require a successful real service verification report
-      ansible.builtin.assert:
-        that:
-          - (cloudfront_sync_live_result.stdout | from_json).real_ufw_nginx_systemd
-          - (cloudfront_sync_live_result.stdout | from_json).live_checks == 'passed'
+        - name: Copy the role's top-level bundle sources for the test bundle
+          ansible.builtin.copy:
+            src: "{{ item }}"
+            dest: "{{ cloudfront_sync_s0_workdir }}/role-files/"
+            owner: root
+            group: root
+            mode: "0600"
+          loop: "{{ query('ansible.builtin.fileglob', cloudfront_sync_s0_role_files ~ '/*') }}"
+
+        - name: Copy the S0 refusal verifier, its marker helper and the shared install target list
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/{{ item }}"
+            dest: "{{ cloudfront_sync_s0_workdir }}/{{ item }}"
+            owner: root
+            group: root
+            mode: "0600"
+          loop: [s0_refusal_verify.py, disposable_marker.py, install_targets.json]
+
+        - name: Run every CLI subcommand and compare host state before and after
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/python3
+              - "{{ cloudfront_sync_s0_workdir }}/s0_refusal_verify.py"
+              - "{{ cloudfront_sync_s0_workdir }}/role-files"
+          register: cloudfront_sync_s0_result
+          changed_when: true
+
+        - name: Require the S0 refusal report
+          vars:
+            cloudfront_sync_s0_report: "{{ cloudfront_sync_s0_result.stdout | from_json }}"
+          ansible.builtin.assert:
+            that:
+              - cloudfront_sync_s0_report.s0_checks == 'passed'
+              - not cloudfront_sync_s0_report.runtime_actor_connected
+              - cloudfront_sync_s0_report.host_state_unchanged
+              - cloudfront_sync_s0_report.argv_secret_not_echoed
+              - cloudfront_sync_s0_report.fixture_removed
+              - cloudfront_sync_s0_report.lock_at_start in ['absent', 'present']
+              - cloudfront_sync_s0_report.refused_commands | length > 0
+              - cloudfront_sync_s0_report.nginx_phase.nginx_checks == 'passed'
+              - cloudfront_sync_s0_report.nginx_phase.bundles >= 2
+              - cloudfront_sync_s0_report.nginx_phase.policy_verified == 'nginx_policy_verified'
+              - cloudfront_sync_s0_report.nginx_phase.recursive_on == 'nginx_policy_unsupported'
+              - cloudfront_sync_s0_report.nginx_phase.bundle_symlink == 'nginx_observation_failed'
+              - cloudfront_sync_s0_report.nginx_phase.nginx_stopped == 'nginx_policy_unsupported'
+              - cloudfront_sync_s0_report.nginx_phase.stopped_host_unchanged
+              - cloudfront_sync_s0_report.nginx_phase.stopped_sandbox_ran
+              - cloudfront_sync_s0_report.nginx_phase.host_unchanged_per_command
+              - cloudfront_sync_s0_report.nginx_phase.nginx_not_reloaded_by_commands
+              - cloudfront_sync_s0_report.nginx_phase.refused_commands == cloudfront_sync_s0_report.refused_commands
+              - cloudfront_sync_s0_report.nginx_phase.refused_secret_not_echoed
+              - cloudfront_sync_s0_report.nginx_phase.transient_units_left == 0
+              - cloudfront_sync_s0_report.nginx_phase.secrets_not_echoed
+              - cloudfront_sync_s0_report.nginx_phase.secret_files_absent
+              - cloudfront_sync_s0_report.nginx_phase.journal_secret_free
+              - cloudfront_sync_s0_report.nginx_phase.fixture_removed
+              - cloudfront_sync_s0_report.nginx_phase.nginx_restored
+      always:
+        - name: Remove the verifier work directory (success or failure)
+          ansible.builtin.file:
+            path: "{{ cloudfront_sync_s0_workdir }}"
+            state: absent
