@@ -1,0 +1,73 @@
+*filter
+:ufw-user-input - [0:0]
+:ufw-user-output - [0:0]
+:ufw-user-forward - [0:0]
+:ufw-before-logging-input - [0:0]
+:ufw-before-logging-output - [0:0]
+:ufw-before-logging-forward - [0:0]
+:ufw-user-logging-input - [0:0]
+:ufw-user-logging-output - [0:0]
+:ufw-user-logging-forward - [0:0]
+:ufw-after-logging-input - [0:0]
+:ufw-after-logging-output - [0:0]
+:ufw-after-logging-forward - [0:0]
+:ufw-logging-deny - [0:0]
+:ufw-logging-allow - [0:0]
+:ufw-user-limit - [0:0]
+:ufw-user-limit-accept - [0:0]
+### RULES ###
+
+### tuple ### limit tcp 22 0.0.0.0/0 any 0.0.0.0/0 in comment=666978747572652d7373682d6c696d6974
+-A ufw-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --set
+-A ufw-user-input -p tcp --dport 22 -m conntrack --ctstate NEW -m recent --update --seconds 30 --hitcount 6 -j ufw-user-limit
+-A ufw-user-input -p tcp --dport 22 -j ufw-user-limit-accept
+
+### tuple ### allow tcp 22 0.0.0.0/0 any 203.0.113.8 in comment=666978747572652d61646d696e
+-A ufw-user-input -p tcp --dport 22 -s 203.0.113.8 -j ACCEPT
+
+### tuple ### deny tcp 8443 0.0.0.0/0 any 198.51.100.0/24 in comment=666978747572652d64656e79
+-A ufw-user-input -p tcp --dport 8443 -s 198.51.100.0/24 -j DROP
+
+### tuple ### reject udp 9443 0.0.0.0/0 any 198.51.100.0/24 in comment=666978747572652d72656a656374
+-A ufw-user-input -p udp --dport 9443 -s 198.51.100.0/24 -j REJECT
+
+### tuple ### allow_log tcp 80,443 0.0.0.0/0 any 203.0.113.0/24 in comment=666978747572652d6d756c74692d6c6f67
+-A ufw-user-logging-input -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -m conntrack --ctstate NEW -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW ALLOW] "
+-A ufw-user-logging-input -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -j RETURN
+-A ufw-user-input -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -j ufw-user-logging-input
+-A ufw-user-input -p tcp -m multiport --dports 80,443 -s 203.0.113.0/24 -j ACCEPT
+
+### tuple ### route:allow tcp 8080 203.0.113.0/24 any 198.51.100.0/24 in_eth0!out_eth1 comment=666978747572652d726f757465
+-A ufw-user-forward -i eth0 -o eth1 -p tcp -d 203.0.113.0/24 --dport 8080 -s 198.51.100.0/24 -j ACCEPT
+
+### tuple ### allow udp 5353 0.0.0.0/0 any 0.0.0.0/0 in_lo comment=666978747572652d696e74657266616365
+-A ufw-user-input -i lo -p udp --dport 5353 -j ACCEPT
+
+### tuple ### allow tcp 8081 0.0.0.0/0 any 0.0.0.0/0 CloudFront%20Fixture%20App - in
+-A ufw-user-input -p tcp --dport 8081 -j ACCEPT -m comment --comment 'dapp_CloudFront%20Fixture%20App'
+
+### tuple ### allow udp 53 0.0.0.0/0 any 0.0.0.0/0 out_eth0 comment=666978747572652d6f7574626f756e64
+-A ufw-user-output -o eth0 -p udp --dport 53 -j ACCEPT
+
+### tuple ### allow tcp 9000 0.0.0.0/0 any 203.0.113.99 in comment=666978747572652d7461696c
+-A ufw-user-input -p tcp --dport 9000 -s 203.0.113.99 -j ACCEPT
+
+### tuple ### allow tcp 443 0.0.0.0/0 any 198.18.0.0/28 in comment=636c6f756466726f6e742d73796e63
+-A ufw-user-input -p tcp --dport 443 -s 198.18.0.0/28 -j ACCEPT
+
+### END RULES ###
+
+### LOGGING ###
+-A ufw-after-logging-input -j LOG --log-prefix "[UFW BLOCK] " -m limit --limit 3/min --limit-burst 10
+-A ufw-after-logging-forward -j LOG --log-prefix "[UFW BLOCK] " -m limit --limit 3/min --limit-burst 10
+-I ufw-logging-deny -m conntrack --ctstate INVALID -j RETURN -m limit --limit 3/min --limit-burst 10
+-A ufw-logging-deny -j LOG --log-prefix "[UFW BLOCK] " -m limit --limit 3/min --limit-burst 10
+-A ufw-logging-allow -j LOG --log-prefix "[UFW ALLOW] " -m limit --limit 3/min --limit-burst 10
+### END LOGGING ###
+
+### RATE LIMITING ###
+-A ufw-user-limit -m limit --limit 3/minute -j LOG --log-prefix "[UFW LIMIT BLOCK] "
+-A ufw-user-limit -j REJECT
+-A ufw-user-limit-accept -j ACCEPT
+### END RATE LIMITING ###
+COMMIT

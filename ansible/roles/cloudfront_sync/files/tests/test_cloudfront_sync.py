@@ -1,4 +1,5 @@
-"""Unit and transactional fault tests; no host firewall access."""
+"""Unit tests and S0 runtime-actor refusal characterization; no host firewall access."""
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -6,23 +7,23 @@ import tempfile
 import unittest
 from unittest import mock
 import contextlib
+import functools
 import io
 import os
+import re
+import shutil
+import signal
+import socket
 import subprocess
+import sys
+import textwrap
+import types
+import urllib.request
 
 MODULE_PATH = Path(__file__).parents[1] / 'cloudfront-sync.py'
 spec = importlib.util.spec_from_file_location('cloudfront_sync', MODULE_PATH)
 cf = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cf)
-
-V4 = '192.0.2.0/24'
-V6 = '2001:db8::/32'
-
-
-def document(ranges=(V4, V6), token='10'):
-    return {'syncToken': token, 'prefixes': [{'ip_prefix': r, 'service': 'CLOUDFRONT_ORIGIN_FACING'} for r in ranges if ':' not in r],
-            'ipv6_prefixes': [{'ipv6_prefix': r, 'service': 'CLOUDFRONT_ORIGIN_FACING'} for r in ranges if ':' in r]}
-
 
 def config():
     return {'host_address': '192.0.2.10', 'firewall': {'backend': 'ufw', 'ports': [443]},
@@ -30,79 +31,9 @@ def config():
             'limits': {'max_changes': 10, 'min_ratio': .8}, 'notify_unit': ''}
 
 
-class FakeHost:
-    def __init__(self):
-        self.rules = []
-        self.doc = document()
-        self.stops = 0
-        self.fail_action = None
-        self.actions = []
-        self.nginx = {}
 
-    def check_target(self, cfg):
-        pass
-
-    def preflight(self, cfg):
-        self.check_target(cfg)
-
-    def fetch(self):
-        return self.doc
-
-    def snapshot(self, cfg):
-        runtime = []
-        for i, r in enumerate(self.rules):
-            port = str(r['port']) + '/tcp' if r['port'] else (r['args'][1] if len(r['args']) == 2 else None)
-            policy = r.get('test_policy', {'action': r['args'][0], 'source': r['source'] or 'any', 'port': port})
-            runtime.append({'number': i + 1, 'family': cf.ipaddress.ip_network(r['source']).version if r['source'] else 4, 'key': cf.digest(r), 'policy': policy})
-        return {'rules': [dict(x) for x in self.rules], 'runtime': runtime, 'nginx': dict(self.nginx), 'bundles': {}}
-
-    def add_rule(self, rule):
-        self.actions.append(('add', rule))
-        if self.fail_action == 'add':
-            self.fail_action = None
-            raise cf.SyncError('injected add failure')
-        if rule not in self.rules:
-            self.rules.append(dict(rule))
-
-    def delete_rule(self, rule):
-        self.actions.append(('delete', rule))
-        if self.fail_action == 'delete':
-            self.fail_action = None
-            raise cf.SyncError('injected delete failure')
-        self.rules.remove(rule)
-
-    def restore_rule(self, rule, before):
-        original = before['rules']
-        position = original.index(rule)
-        for successor in original[position + 1:]:
-            if successor in self.rules:
-                self.rules.insert(self.rules.index(successor), dict(rule))
-                return
-        self.add_rule(rule)
-
-    def write_nginx(self, cfg, files):
-        self.nginx = dict(files)
-
-    def check_reload_nginx(self):
-        if self.fail_action == 'reload':
-            self.fail_action = None
-            raise cf.SyncError('injected reload failure')
-
-    def stop_timer(self):
-        self.stops += 1
-
-
-class ValidationTests(unittest.TestCase):
-    def test_filter_dualstack_and_dedupe(self):
-        d = document((V4, V4, V6))
-        d['prefixes'].append({'service': 'CLOUDFRONT', 'ip_prefix': '198.51.100.0/24'})
-        self.assertEqual(cf.parse_aws(d)['ranges'], [V4, V6])
-
-    def test_reject_invalid_aws(self):
-        for d in [document((V4,)), document(('0.0.0.0/0', V6)), document((V4, V6), 'bad'), {}, document(('invalid', V6))]:
-            with self.subTest(d=d), self.assertRaises(cf.SyncError):
-                cf.parse_aws(d)
-
+class ConfigTests(unittest.TestCase):
+    """validate_config is on the read path (main validates the config for every read command)."""
     def test_config_types_and_path_injection(self):
         for mutate in [lambda c: c['firewall'].update(ports=[True]), lambda c: c['firewall'].update(ports=[22]),
                        lambda c: c['limits'].update(max_changes=True), lambda c: c['nginx'].update(enabled='false'),
@@ -111,404 +42,54 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(c=c), self.assertRaises(cf.SyncError):
                 cf.validate_config(c)
 
-    def test_limits_count_and_per_family(self):
-        self.assertTrue(cf.within_limits([V4, V6], [V4, V6, '198.51.100.0/24'], {'max_changes': 1, 'min_ratio': .8}))
-        self.assertFalse(cf.within_limits([V4, V6], [V4], {'max_changes': 10, 'min_ratio': .8}))
-        self.assertFalse(cf.within_limits([], [V4, V6], {'max_changes': 10, 'min_ratio': .8}))
-
-    def test_ufw_parser_preserves_unmanaged(self):
-        lines = "Added user rules:\nufw allow 22/tcp\nufw allow from 192.0.2.0/24 to any port 443 proto tcp comment 'cloudfront-sync'\n"
-        rules = cf.parse_ufw(lines)
-        self.assertEqual(len(rules), 2)
-        self.assertEqual(rules[1]['source'], V4)
-        self.assertEqual(rules[1]['comment'], 'cloudfront-sync')
-        self.assertIsNone(rules[0]['source'])
-
-
-    def test_ufw_formatting_and_hostmask_normalization(self):
-        a = cf.parse_ufw("ufw allow from 192.0.2.1 to any port 443 proto tcp comment 'cloudfront-sync'\n")
-        b = cf.parse_ufw("ufw allow in proto tcp from 192.0.2.1/32 to any port 443 comment cloudfront-sync\n")
-        self.assertEqual(a, b)
-        self.assertEqual(a[0]['args'], cf.make_rule('192.0.2.1/32', 443)['args'])
-        with self.assertRaises(cf.SyncError):
-            cf.parse_ufw('ufw allow out 443 comment cloudfront-sync\n')
-
-    def test_nginx_tokenization_ignores_commented_includes(self):
-        text = '# include /secret;\ngeo $realip_remote_addr $cf { default 0; include /etc/nginx/cf/geo.conf; }'
-        blocks = cf.nginx_geo_blocks(cf.nginx_tokens(text))
-        self.assertEqual(blocks[0][0], '$realip_remote_addr')
-        self.assertIn(['include', '/etc/nginx/cf/geo.conf', ';'], cf.chunks(blocks[0][1]))
-        self.assertNotIn('/secret', cf.nginx_tokens(text))
-        self.assertRaises(cf.SyncError, cf.nginx_tokens, 'map "unclosed')
-        self.assertRaises(cf.SyncError, cf.nginx_geo_blocks, ['geo', '$a', '$b', '{'])
-
-    def test_extra_config_and_invalid_ranges(self):
+    def test_extra_config_keys_and_invalid_values(self):
         for modify in [lambda c: c.update(extra='value'), lambda c: c.update(host_address=1),
                        lambda c: c['nginx'].update(enabled=True), lambda c: c['limits'].update(min_ratio=float('nan')),
                        lambda c: c['firewall'].update(backend='iptables'), lambda c: c['firewall'].update(ports=[443, 443])]:
             c = config(); modify(c)
             self.assertRaises(cf.SyncError, cf.validate_config, c)
-        for text in [{'prefixes': [], 'ipv6_prefixes': [], 'syncToken': '10'},
-                     {'prefixes': [{'service': 'CLOUDFRONT_ORIGIN_FACING', 'ip_prefix': V6}], 'ipv6_prefixes': [], 'syncToken': '10'}]:
-            self.assertRaises(cf.SyncError, cf.parse_aws, text)
 
+    def test_host_address_scope_id_and_non_ascii_strings_rejected(self):
+        # A scoped IPv6 address is never a public host address, and every
+        # string must be ASCII: config_hash (canonical JSON, ensure_ascii=False)
+        # then equals the ASCII-escaped form already persisted on hosts.
+        surrogate = json.loads('"fe80::1%\\ud800"')
+        self.assertEqual(surrogate, 'fe80::1%\ud800')
+        cases = [(lambda c: c.update(host_address='fe80::1%\u00e9th0'), 'config strings must be ASCII'),
+                 (lambda c: c.update(host_address=surrogate), 'config strings must be ASCII'),
+                 (lambda c: c.update(host_address=json.loads('"\\ud800"')), 'config strings must be ASCII'),
+                 (lambda c: c.update(notify_unit=json.loads('"a\\ud800.service"')), 'config strings must be ASCII'),
+                 (lambda c: c['nginx'].update(shared_dir='/etc/nginx/\u00e9'), 'config strings must be ASCII'),
+                 (lambda c: c['limits'].update({'\u00e9': 1}), 'config strings must be ASCII'),
+                 (lambda c: c.update(host_address='fe80::1%eth0'), 'host_address must not carry an IPv6 scope id'),
+                 (lambda c: c.update(host_address='fe80::1%1'), 'host_address must not carry an IPv6 scope id')]
+        for mutate, message in cases:
+            c = config(); mutate(c)
+            with self.subTest(c=repr(c)), self.assertRaisesRegex(cf.SyncError, '^' + re.escape(message) + '$'):
+                cf.validate_config(c)
+        for host in ('192.0.2.10', '2001:db8::10', 'fe80::1'):
+            c = config(); c['host_address'] = host
+            self.assertIs(cf.validate_config(c), c)
 
-class EngineTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.host = FakeHost()
-        self.engine = cf.Engine(config(), Path(self.temp.name), self.host, clock=lambda: 1000)
+    def test_accepted_config_is_ascii_so_both_json_forms_agree(self):
+        c = config()
+        c['nginx'].update(enabled=True, bundles=[{'geo_file': '/etc/nginx/g.conf', 'realip_file': '/etc/nginx/r.conf'}])
+        c['notify_unit'] = 'cloudfront-reload@web-01.service'
+        cf.validate_config(c)
+        wide = json.dumps(c, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        self.assertTrue(wide.isascii())
+        self.assertEqual(wide, json.dumps(c, sort_keys=True, separators=(',', ':')))
 
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def initial(self):
-        p = self.engine.plan()
-        self.assertTrue(p['approval_required'])
-        return self.engine.apply(p['approve_token'])
-
-    def test_initial_needs_approval_then_commits(self):
-        self.assertRaises(cf.ApprovalRequired, self.engine.sync)
-        self.initial()
-        self.assertEqual(len(self.host.rules), 2)
-        self.assertEqual(self.engine.state()['ranges'], [V4, V6])
-        self.assertEqual(self.engine.status()['last_success'], 1000)
-
-    def test_wrong_expired_reused_changed_token(self):
-        p = self.engine.plan()
-        self.assertRaises(cf.SyncError, self.engine.apply, 'wrong')
-        self.engine.clock = lambda: 5000
-        self.assertRaises(cf.SyncError, self.engine.apply, p['approve_token'])
-        self.engine.clock = lambda: 1000
-        p = self.engine.plan(); self.host.doc = document(token='11')
-        self.assertRaises(cf.SyncError, self.engine.apply, p['approve_token'])
-        p = self.engine.plan(); self.engine.apply(p['approve_token'])
-        self.assertRaises(cf.SyncError, self.engine.apply, p['approve_token'])
-
-    def test_external_change_rejects_before_mutation(self):
-        self.initial()
-        self.host.rules.append(cf.make_rule('203.0.113.0/24', 443))
-        count = len(self.host.actions)
-        self.assertRaises(cf.SyncError, self.engine.sync)
-        self.assertEqual(len(self.host.actions), count)
-
-    def test_rollback_on_partial_add_failure(self):
-        self.initial()
-        old = list(self.host.rules)
-        self.host.doc = document((V4, V6, '198.51.100.0/24'), token='11')
-        self.host.fail_action = 'add'
-        self.assertRaises(cf.SyncError, self.engine.sync)
-        self.assertEqual(self.host.rules, old)
-        self.assertEqual(self.engine.state()['aws_sync_token'], '10')
-        self.assertFalse((self.engine.private / 'journal.json').exists())
-
-    def test_noop_refreshes_success_and_rejects_old_feed(self):
-        self.initial()
-        self.engine.clock = lambda: 1100
-        self.engine.sync()
-        self.assertEqual(self.engine.status()['last_success'], 1100)
-        self.host.doc = document(token='9')
-        self.assertRaises(cf.SyncError, self.engine.sync)
-        self.assertEqual(self.engine.status()['last_success'], 1100)
-
-    def test_threshold_block_leaves_state_untouched(self):
-        self.initial()
-        self.engine.config['limits']['max_changes'] = 1
-        # Config changes are not silently accepted against existing state.
-        self.assertRaises(cf.SyncError, self.engine.sync)
-
-    def test_legacy_import_no_rewrite_and_then_sync(self):
-        self.host.rules = [cf.make_rule(r, 443, comment='legacy') for r in (V4, V6)]
-        legacy = Path(self.temp.name) / 'legacy.json'
-        legacy.write_text(json.dumps({'phase': 'confirmed', 'ranges': [V4, V6]}))
-        p = self.engine.import_plan(legacy)
-        self.engine.import_state(p['approve_token'])
-        self.assertEqual(self.host.actions, [])
-        self.assertEqual(self.host.rules[0]['comment'], 'legacy')
-        self.host.doc = document((V4, V6, '198.51.100.0/24'), '11')
-        self.assertRaises(cf.ApprovalRequired, self.engine.sync)
-        plan = self.engine.plan()
-        self.assertTrue(plan['approval_required'])
-        self.engine.apply(plan['approve_token'])
-        self.assertEqual(len(self.host.rules), 3)
-
-    def test_import_missing_legacy_rule_and_changed_evidence_reject(self):
-        legacy = Path(self.temp.name) / 'legacy.json'
-        legacy.write_text(json.dumps({'ranges': [V4, V6]}))
-        self.assertRaises(cf.SyncError, self.engine.import_plan, legacy)
-        self.host.rules = [cf.make_rule(r, 443, comment='legacy') for r in (V4, V6)]
-        p = self.engine.import_plan(legacy)
-        legacy.write_text(json.dumps({'ranges': [V4]}))
-        self.assertRaises(cf.SyncError, self.engine.import_state, p['approve_token'])
-
-
-    def test_partial_multiple_adds_are_rolled_back(self):
-        self.initial()
-        before = self.host.snapshot(self.engine.config)
-        self.host.doc = document((V4, V6, '198.51.100.0/24', '203.0.113.0/24'), '11')
-        original = self.host.add_rule
-        calls = []
-        def fail_second(rule):
-            calls.append(rule)
-            if len(calls) == 2:
-                raise cf.SyncError('second addition fails')
-            original(rule)
-        with mock.patch.object(self.host, 'add_rule', side_effect=fail_second):
-            self.assertRaises(cf.SyncError, self.engine.sync)
-        self.assertEqual(self.host.snapshot(self.engine.config), before)
-        self.assertEqual(self.engine.state()['aws_sync_token'], '10')
-
-    def test_recovery_failed_stops_timer_and_keeps_evidence(self):
-        self.initial()
-        self.host.doc = document((V4, V6, '198.51.100.0/24', '203.0.113.0/24'), '11')
-        original = self.host.add_rule
-        calls = []
-        def fail_second(rule):
-            calls.append(rule)
-            if len(calls) == 2:
-                raise cf.SyncError('add failure')
-            original(rule)
-        with mock.patch.object(self.host, 'add_rule', side_effect=fail_second), mock.patch.object(self.host, 'delete_rule', side_effect=cf.SyncError('rollback failure')):
-            self.assertRaises(cf.SyncError, self.engine.sync)
-        self.assertEqual(self.host.stops, 1)
-        self.assertTrue(self.engine.status()['recovery_failed'])
-        self.assertTrue((self.engine.private / 'journal.json').exists())
-        self.engine.preflight()
-        self.assertEqual(len(self.host.rules), 2)
-        self.assertFalse((self.engine.private / 'journal.json').exists())
-
-    def test_crash_between_nginx_files_recovers_before_preflight(self):
-        self.engine.config['nginx'].update(enabled=True, bundles=[{'geo_file': '/etc/nginx/a.conf', 'realip_file': '/etc/nginx/b.conf'}])
-        self.host.nginx = cf.render_nginx([V4, V6])
-        self.initial()
-        before = self.host.snapshot(self.engine.config)
-        old = self.engine.state()
-        target = cf.render_nginx([V4, '198.51.100.0/24', V6])
-        journal = {'version': 1, 'config_hash': cf.digest(self.engine.config), 'before': before, 'old_state': old,
-                   'target_rules': old['owned_rules'], 'target_nginx': target, 'new_state': None}
-        cf.atomic_json(self.engine.private / 'journal.json', journal)
-        self.host.nginx['cloudfront-geo.conf'] = target['cloudfront-geo.conf']
-        def validate_runtime(cfg):
-            cf.parse_nginx_ranges(self.host.nginx)
-        with mock.patch.object(self.host, 'preflight', side_effect=validate_runtime):
-            self.engine.preflight()
-        self.assertEqual(self.host.snapshot(self.engine.config), before)
-
-    def test_committed_crash_recovery_and_no_destructive_foreign_restore(self):
-        self.initial()
-        state = self.engine.state()
-        journal = {'version': 1, 'config_hash': cf.digest(self.engine.config), 'before': state['snapshot'], 'old_state': None,
-                   'target_rules': state['owned_rules'], 'target_nginx': {}, 'new_state': state}
-        cf.atomic_json(self.engine.private / 'journal.json', journal)
-        self.engine.preflight()
-        self.assertFalse((self.engine.private / 'journal.json').exists())
-        self.assertEqual(len(self.host.rules), 2)
-        journal['new_state'] = None
-        journal['old_state'] = state
-        cf.atomic_json(self.engine.private / 'journal.json', journal)
-        foreign = cf.make_rule('198.51.100.0/24', 8443, 'administrator')
-        self.host.rules.append(foreign)
-        self.assertRaises(cf.SyncError, self.engine.preflight)
-        self.assertIn(foreign, self.host.rules)
-        self.assertTrue(self.engine.status()['recovery_failed'])
-
-    def test_approved_plan_baseline_change_and_single_use_on_failure(self):
-        p = self.engine.plan()
-        self.host.rules.append(cf.make_rule('198.51.100.0/24', 8443, 'administrator'))
-        self.assertRaises(cf.SyncError, self.engine.apply, p['approve_token'])
-        self.host.rules.clear()
-        p = self.engine.plan()
-        self.host.fail_action = 'add'
-        self.assertRaises(cf.SyncError, self.engine.apply, p['approve_token'])
-        self.assertRaises(cf.SyncError, self.engine.apply, p['approve_token'])
-        self.assertIsNone(self.engine.state())
-
-    def test_nginx_reload_failure_restores_shared_files(self):
-        self.engine.config['nginx'].update(enabled=True, bundles=[{'geo_file': '/etc/nginx/a.conf', 'realip_file': '/etc/nginx/b.conf'}])
-        self.host.nginx = cf.render_nginx([V4, V6])
-        self.initial()
-        before = self.host.snapshot(self.engine.config)
-        self.host.doc = document((V4, V6, '198.51.100.0/24'), '11')
-        self.host.fail_action = 'reload'
-        self.assertRaises(cf.SyncError, self.engine.sync)
-        self.assertEqual(self.host.snapshot(self.engine.config), before)
-        self.assertEqual(self.engine.state()['aws_sync_token'], '10')
-
-    def test_legacy_apply_refused_and_import_evidence_bound(self):
-        self.host.rules = [cf.make_rule(r, 443, comment='legacy') for r in (V4, V6)]
-        p = self.engine.plan()
-        self.assertTrue(p['import_required'])
-        self.assertRaises(cf.SyncError, self.engine.apply, p['approve_token'])
-        self.assertRaises(cf.SyncError, self.engine.import_state, p['approve_token'])
-
-    def test_backend_none_never_calls_ufw(self):
-        self.engine.config['firewall']['backend'] = 'none'
-        self.initial()
-        self.assertEqual(self.host.actions, [])
-        self.engine.sync()
-        self.assertEqual(self.host.actions, [])
-
-
-
-class HostTests(unittest.TestCase):
-    def test_subprocess_failures_are_sanitized(self):
-        h = cf.Host()
-        with mock.patch.object(cf.subprocess, 'run', return_value=subprocess.CompletedProcess(['nginx'], 1, 'ORIGIN_SECRET', 'ORIGIN_SECRET')):
-            with self.assertRaises(cf.SyncError) as caught:
-                h.command(['nginx', '-T'])
-            self.assertNotIn('ORIGIN_SECRET', str(caught.exception))
-        with mock.patch.object(cf.subprocess, 'run', side_effect=subprocess.TimeoutExpired('nginx', 1, output='ORIGIN_SECRET')):
-            with self.assertRaises(cf.SyncError) as caught:
-                h.command(['nginx', '-T'])
-            self.assertNotIn('ORIGIN_SECRET', str(caught.exception))
-        with mock.patch.object(cf.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'ok', '')) as run:
-            self.assertEqual(h.command(['ip', 'address']), 'ok')
-            self.assertNotIn('shell', run.call_args.kwargs)
-            self.assertEqual(run.call_args.kwargs['env']['LC_ALL'], 'C')
-
-    def test_fetch_size_errors_and_no_redirect(self):
-        response = mock.MagicMock()
-        response.__enter__.return_value = response
-        response.read.return_value = json.dumps(document()).encode()
-        opener = mock.Mock()
-        opener.open.return_value = response
-        with mock.patch.object(cf.urllib.request, 'build_opener', return_value=opener):
-            self.assertEqual(cf.Host().fetch(), document())
-            opener.open.assert_called_with(cf.AWS_URL, timeout=30)
-            response.read.return_value = b'x' * (cf.MAX_DOWNLOAD + 1)
-            self.assertRaises(cf.SyncError, cf.Host().fetch)
-            response.read.return_value = b'not json'
-            self.assertRaises(cf.SyncError, cf.Host().fetch)
-            opener.open.side_effect = OSError('sensitive')
-            self.assertRaises(cf.SyncError, cf.Host().fetch)
-        self.assertRaises(cf.SyncError, cf.NoRedirect().redirect_request, None, None, None, None, None, 'https://evil')
-
-    def fixture(self, n=False):
+    def test_duplicate_or_malformed_nginx_bundles_rejected(self):
         cfg = config()
-        cfg['nginx'].update(enabled=n, bundles=[{'geo_file': '/etc/nginx/geo.conf', 'realip_file': '/etc/nginx/server.conf'}] if n else [])
-        geo = 'geo $realip_remote_addr $cf { default 0; include /etc/nginx/cloudfront/cloudfront-geo.conf; }'
-        real = 'include /etc/nginx/cloudfront/cloudfront-realip.conf; real_ip_header X-Forwarded-For; real_ip_recursive off;'
-        outputs = {
-            ('ip', '-json', 'address', 'show'): json.dumps([{'addr_info': [{'local': cfg['host_address']}]}]),
-            ('sshd', '-T'): 'port 22\n'.replace('\\n', '\n'),
-            ('ufw', 'status'): 'Status: active\n',
-            ('nginx', '-t'): '',
-            ('nginx', '-T'): '# configuration file /etc/nginx/geo.conf:\n# configuration file /etc/nginx/server.conf:\n',
-        }
-        host = cf.Host()
-        host.command = mock.Mock(side_effect=lambda cmd: outputs[tuple(cmd)])
-        return cfg, host, outputs, geo, real
-
-    def test_host_identity_ssh_and_firewall_preflight(self):
-        cfg, host, outputs, _, _ = self.fixture()
-        with mock.patch.object(cf.shutil, 'which', return_value='/usr/sbin/command'):
-            host.preflight(cfg)
-            outputs[('sshd', '-T')] = 'port 443\n'
-            self.assertRaises(cf.SyncError, host.preflight, cfg)
-            outputs[('sshd', '-T')] = 'port 22\n'
-            outputs[('ufw', 'status')] = 'Status: inactive\n'
-            self.assertRaises(cf.SyncError, host.preflight, cfg)
-            outputs[('ip', '-json', 'address', 'show')] = '[]'
-            self.assertRaises(cf.SyncError, host.preflight, cfg)
-        with mock.patch.object(cf.shutil, 'which', return_value=None):
-            self.assertRaises(cf.SyncError, host.preflight, cfg)
-
-    def test_nginx_preflight_context_and_trust_validation(self):
-        cfg, host, outputs, geo, real = self.fixture(True)
-        content = {'/etc/nginx/geo.conf': geo, '/etc/nginx/server.conf': real}
-        with mock.patch.object(cf.shutil, 'which', return_value='/usr/sbin/command'), mock.patch.object(cf, 'check_path'), mock.patch.object(cf, 'read_text', side_effect=lambda p: content[str(p)]):
-            host.preflight(cfg)
-            for invalid in [geo.replace('$realip_remote_addr', '$remote_addr'), '# ' + geo,
-                            geo.replace('default 0;', 'default 1;'), geo.replace('default 0;', 'default 0; 203.0.113.0/24 1;')]:
-                content['/etc/nginx/geo.conf'] = invalid
-                self.assertRaises(cf.SyncError, host.preflight, cfg)
-            content['/etc/nginx/geo.conf'] = geo
-            for invalid in [real.replace('off;', 'on;'), real + ' set_real_ip_from 0.0.0.0/0;',
-                            real.replace('X-Forwarded-For', 'X-Real-IP')]:
-                content['/etc/nginx/server.conf'] = invalid
-                self.assertRaises(cf.SyncError, host.preflight, cfg)
-            content['/etc/nginx/server.conf'] = real
-            outputs[('nginx', '-T')] = ''
-            self.assertRaises(cf.SyncError, host.preflight, cfg)
-
-    def test_snapshot_permits_raw_partial_files_for_recovery(self):
-        cfg, host, _, _, _ = self.fixture(True)
-        files = cf.render_nginx([V4, V6])
-        files['cloudfront-geo.conf'] = cf.render_nginx([V4, V6, '198.51.100.0/24'])['cloudfront-geo.conf']
-        def read(path):
-            return files.get(Path(path).name, 'bundle source including ORIGIN_SECRET')
-        host.command = mock.Mock(return_value='ufw allow 22/tcp\n')
-        with mock.patch.object(cf, 'read_text', side_effect=read):
-            snapshot = host.snapshot(cfg)
-        self.assertNotIn('ORIGIN_SECRET', cf.canonical(snapshot))
-        self.assertRaises(cf.SyncError, cf.parse_nginx_ranges, snapshot['nginx'])
-        self.assertEqual(len(snapshot['rules']), 1)
-
-    def test_host_mutation_commands_and_stop_disable(self):
-        host = cf.Host()
-        host.command = mock.Mock(return_value='')
-        rule = cf.make_rule(V4, 443)
-        host.add_rule(rule); host.delete_rule(rule); host.check_reload_nginx(); host.stop_timer()
-        self.assertEqual(host.command.call_args_list[0].args[0], ['ufw'] + rule['args'])
-        self.assertEqual(host.command.call_args_list[1].args[0], ['ufw', '--force', 'delete'] + rule['args'])
-        self.assertEqual(host.command.call_args_list[-1].args[0], ['systemctl', 'disable', '--now', 'cloudfront-sync.timer'])
-        with mock.patch.object(cf, 'check_path'), mock.patch.object(cf, 'atomic_text') as write:
-            host.write_nginx(config(), cf.render_nginx([V4, V6]))
-            self.assertEqual(write.call_count, 2)
-            self.assertRaises(cf.SyncError, host.write_nginx, config(), {'evil': 'x'})
-
-
-
-    def test_runtime_ufw_numbers_include_generic_dualstack_rules(self):
-        text = """Status: active
-[ 1] 22/tcp                     ALLOW IN    Anywhere
-[ 2] 443/tcp                    ALLOW IN    192.0.2.0/24 # legacy
-[ 3] Anywhere                   DENY IN     203.0.113.0/24 # administrator
-[ 4] 22/tcp (v6)                ALLOW IN    Anywhere (v6)
-[ 5] 443/tcp (v6)               ALLOW IN    2001:db8::/32 # legacy
-"""
-        parsed = cf.parse_ufw_numbered(text)
-        self.assertEqual(len(parsed), 5)
-        self.assertEqual(parsed[1]['key'], cf.digest(cf.make_rule(V4, 443, 'legacy')))
-        self.assertEqual(parsed[-1]['key'], cf.digest(cf.make_rule(V6, 443, 'legacy')))
-        self.assertEqual([r['family'] for r in parsed], [4, 4, 4, 6, 6])
-        # Restoring a v4 allow must use runtime deny index3, not show-added index.
-        current = text.replace('[ 2] 443/tcp                    ALLOW IN    192.0.2.0/24 # legacy\n', '').replace('[ 3]', '[ 2]').replace('[ 4]', '[ 3]').replace('[ 5]', '[ 4]')
-        host = cf.Host(); host.command = mock.Mock(return_value=current)
-        host.restore_rule(cf.make_rule(V4, 443, 'legacy'), {'runtime': parsed})
-        self.assertEqual(host.command.call_args.args[0][:3], ['ufw', 'insert', '2'])
-        # No surviving successor in same family means append, which does not
-        # disturb the order of rules in the other family.
-        host.command = mock.Mock(return_value=text.replace('[ 5] 443/tcp (v6)               ALLOW IN    2001:db8::/32 # legacy\n', ''))
-        host.restore_rule(cf.make_rule(V6, 443, 'legacy'), {'runtime': parsed})
-        self.assertEqual(host.command.call_args.args[0], ['ufw'] + cf.make_rule(V6, 443, 'legacy')['args'])
-        self.assertRaises(cf.SyncError, cf.parse_ufw_numbered, text.replace('[ 5]', '[ 6]'))
-        self.assertRaises(cf.SyncError, host.restore_rule, cf.make_rule('203.0.113.0/24', 443), {'runtime': parsed})
-
-
-    def test_runtime_duplicate_positions_and_cross_family_restore(self):
-        duplicate = '[ 1] 443/tcp ALLOW IN 192.0.2.0/24 # legacy\n[ 2] 443/tcp ALLOW IN 192.0.2.0/24 # legacy\n'
-        self.assertRaises(cf.SyncError, cf.parse_ufw_numbered, duplicate)
-        original = cf.parse_ufw_numbered('[ 1] 443/tcp ALLOW IN 192.0.2.0/24 # legacy\n[ 2] 22/tcp (v6) ALLOW IN Anywhere (v6)\n')
-        host = cf.Host(); host.command = mock.Mock(return_value='[ 1] 22/tcp (v6) ALLOW IN Anywhere (v6)\n')
-        host.restore_rule(cf.make_rule(V4, 443, 'legacy'), {'runtime': original})
-        self.assertEqual(host.command.call_args.args[0], ['ufw'] + cf.make_rule(V4, 443, 'legacy')['args'])
+        bundle = {'geo_file': '/etc/nginx/geo.conf', 'realip_file': '/etc/nginx/server.conf'}
+        cfg['nginx'].update(enabled=True, bundles=[bundle, bundle])
+        self.assertRaises(cf.SyncError, cf.validate_config, cfg)
+        cfg['nginx']['bundles'] = [{'geo_file': '/etc/nginx/geo.conf'}]
+        self.assertRaises(cf.SyncError, cf.validate_config, cfg)
 
 
 class FilesystemTests(unittest.TestCase):
-    def test_atomic_modes_and_symlink_refusal(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'file'
-            cf.atomic_text(path, 'content', 0o640)
-            self.assertEqual(path.read_text(), 'content')
-            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
-            link = Path(tmp) / 'link'
-            link.symlink_to(path)
-            self.assertRaises(cf.SyncError, cf.atomic_text, link, 'changed')
-            self.assertEqual(path.read_text(), 'content')
-            self.assertRaises(cf.SyncError, cf.check_path, link)
-            self.assertRaises(cf.SyncError, cf.json_read, path)
-
     def test_lock_exclusion_and_inherited_descriptor(self):
         # Exercise the real flock behavior without relying on production paths.
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,10 +99,10 @@ class FilesystemTests(unittest.TestCase):
                 real_fstat, real_lstat = cf.os.fstat, cf.Path.lstat
                 def fstat(fd):
                     st = real_fstat(fd)
-                    return mock.Mock(st_mode=st.st_mode, st_uid=0, st_dev=st.st_dev, st_ino=st.st_ino)
+                    return mock.Mock(st_mode=st.st_mode, st_uid=0, st_dev=st.st_dev, st_ino=st.st_ino, st_nlink=st.st_nlink)
                 def lstat(p):
                     st = real_lstat(p)
-                    return mock.Mock(st_mode=st.st_mode, st_uid=0, st_dev=st.st_dev, st_ino=st.st_ino)
+                    return mock.Mock(st_mode=st.st_mode, st_uid=0, st_dev=st.st_dev, st_ino=st.st_ino, st_nlink=st.st_nlink)
                 with mock.patch.object(cf.os, 'fstat', side_effect=fstat), mock.patch.object(cf.Path, 'lstat', lstat):
                     with cf.exclusive_lock():
                         self.assertRaises(cf.SyncError, cf.exclusive_lock().__enter__)
@@ -532,6 +113,311 @@ class FilesystemTests(unittest.TestCase):
                     finally:
                         os.close(fd)
 
+    @contextlib.contextmanager
+    def root_owned_lock(self, lock, flock=None, owner=None):
+        """LOCK -> a temporary path, owner faked as root (tests run as non-root).
+
+        Only the lock is faked: Path.lstat of the lock path, and os.fstat of a
+        descriptor whose (st_dev, st_ino) is an inode that has been at the lock
+        path while patched. Every other call returns the real result. ``owner``
+        ({'uid': n}) lets a test change the faked owner while the lock is taken.
+        """
+        real_fstat, real_lstat = cf.os.fstat, cf.Path.lstat
+        owner = {'uid': 0} if owner is None else owner
+        lock_inodes = set()
+        def fake(st):
+            return mock.Mock(st_mode=st.st_mode, st_uid=owner['uid'], st_dev=st.st_dev, st_ino=st.st_ino, st_nlink=st.st_nlink)
+        def note_lock_inode():
+            try:
+                st = real_lstat(lock)
+            except FileNotFoundError:
+                return
+            lock_inodes.add((st.st_dev, st.st_ino))
+        def lstat(path):
+            st = real_lstat(path)
+            if path != lock:
+                return st
+            lock_inodes.add((st.st_dev, st.st_ino))
+            return fake(st)
+        def fstat(fd):
+            st = real_fstat(fd)
+            note_lock_inode()
+            return fake(st) if (st.st_dev, st.st_ino) in lock_inodes else st
+        with (mock.patch.object(cf, 'LOCK', lock), mock.patch.object(cf, 'check_path'),
+              mock.patch.object(cf.os, 'fstat', side_effect=fstat),
+              mock.patch.object(cf.Path, 'lstat', lstat),
+              mock.patch.object(cf.fcntl, 'flock', side_effect=flock) if flock else contextlib.nullcontext()):
+            yield
+
+    def test_root_owned_lock_fakes_only_the_lock(self):
+        """The owner fake is narrow: other paths and descriptors keep their real stat."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lock, other = Path(tmp) / 'lock', Path(tmp) / 'other'
+            lock.write_bytes(b''); other.write_bytes(b'')
+            real_uid = os.lstat(other).st_uid
+            self.assertNotEqual(real_uid, 0)  # tests run as non-root
+            with self.root_owned_lock(lock):
+                self.assertEqual(lock.lstat().st_uid, 0)
+                self.assertEqual(other.lstat().st_uid, real_uid)
+                self.assertEqual(Path(tmp).lstat().st_uid, real_uid)
+                fds = os.open(lock, os.O_RDONLY), os.open(other, os.O_RDONLY)
+                try:
+                    self.assertEqual(cf.os.fstat(fds[0]).st_uid, 0)
+                    self.assertEqual(cf.os.fstat(fds[1]).st_uid, real_uid)
+                finally:
+                    os.close(fds[0]); os.close(fds[1])
+
+    def test_self_opened_lock_replaced_before_flock_is_refused_and_released(self):
+        """The path is checked again after flock: a lock unlinked (and recreated) meanwhile is refused."""
+        real = cf.fcntl.flock
+        for create, shared in ((False, True), (True, False)):
+            for recreate in (True, False):
+                with self.subTest(create=create, shared=shared, recreate=recreate), tempfile.TemporaryDirectory() as tmp:
+                    lock = Path(tmp) / 'lock'
+                    lock.write_bytes(b''); lock.chmod(0o600)
+                    original = os.open(lock, os.O_RDONLY)  # keeps the replaced inode reachable
+                    calls = []
+                    def flock(fd, operation):
+                        calls.append((fd, operation))
+                        if len(calls) == 1:
+                            lock.unlink()
+                            if recreate:
+                                lock.write_bytes(b''); lock.chmod(0o600)
+                        return real(fd, operation)
+                    entered = []
+                    try:
+                        with self.root_owned_lock(lock, flock):
+                            with self.assertRaises(cf.SyncError):
+                                with cf.exclusive_lock(create=create, shared=shared):
+                                    entered.append(True)
+                        self.assertEqual(entered, [])
+                        self.assertEqual(len(calls), 1)
+                        # The command's descriptor was closed: the replaced inode is unlocked.
+                        real(original, cf.fcntl.LOCK_EX | cf.fcntl.LOCK_NB)
+                        real(original, cf.fcntl.LOCK_UN)
+                    finally:
+                        os.close(original)
+
+    def test_self_opened_lock_changed_owner_after_flock_is_refused(self):
+        """The post-flock check is the full lock-file check, not only an inode comparison."""
+        real = cf.fcntl.flock
+        for create, shared in ((False, True), (True, False)):
+            with self.subTest(create=create, shared=shared), tempfile.TemporaryDirectory() as tmp:
+                lock = Path(tmp) / 'lock'
+                lock.write_bytes(b''); lock.chmod(0o600)
+                owner = {'uid': 0}
+                def flock(fd, operation):
+                    owner['uid'] = 1000
+                    return real(fd, operation)
+                with self.root_owned_lock(lock, flock, owner):
+                    with self.assertRaises(cf.SyncError):
+                        with cf.exclusive_lock(create=create, shared=shared):
+                            self.fail('entered with a lock no longer owned by root')
+
+    def test_main_lock_replaced_before_flock_is_sync_failed(self):
+        """Through main(): a replaced lock is the fixed sync_failed, before the bundle is touched."""
+        real = cf.fcntl.flock
+        for command in ('inspect-state', 'inspect-runtime', 'verify-cohort'):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
+                lock = Path(tmp) / 'lock'
+                lock.write_bytes(b''); lock.chmod(0o600)
+                def flock(fd, operation):
+                    lock.unlink(); lock.write_bytes(b''); lock.chmod(0o600)
+                    return real(fd, operation)
+                output, error = io.StringIO(), io.StringIO()
+                with (self.root_owned_lock(lock, flock), mock.patch.object(cf.os, 'geteuid', return_value=0),
+                      mock.patch.object(cf, '_bundle_runtime') as runtime, mock.patch.object(cf, '_bundle_config') as read,
+                      contextlib.redirect_stdout(output), contextlib.redirect_stderr(error)):
+                    self.assertEqual(cf.main([command]), 1)
+                runtime.assert_not_called(); read.assert_not_called()
+                self.assertEqual(output.getvalue(), '')
+                self.assertEqual(error.getvalue(), cf.canonical({'error': 'sync_failed'}) + '\n')
+
+    def flock_recorder(self):
+        """A pass-through fcntl.flock that records each (fd, operation)."""
+        real, calls = cf.fcntl.flock, []
+        def flock(fd, operation):
+            calls.append((fd, operation))
+            return real(fd, operation)
+        return calls, flock
+
+    def test_self_opened_shared_lock_is_lock_sh_nonblocking_and_never_created(self):
+        """U5 B3: an inspection's own lock fd is LOCK_SH|LOCK_NB, opened read-only, never created."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / 'lock'
+            lock.write_bytes(b''); lock.chmod(0o600)
+            calls, flock = self.flock_recorder()
+            with self.root_owned_lock(lock, flock):
+                with cf.exclusive_lock(create=False, shared=True):
+                    pass
+            self.assertEqual([op for _fd, op in calls], [cf.fcntl.LOCK_SH | cf.fcntl.LOCK_NB])
+            missing = Path(tmp) / 'missing'
+            with self.root_owned_lock(missing):
+                with self.assertRaises(FileNotFoundError):
+                    with cf.exclusive_lock(create=False, shared=True):
+                        pass
+            self.assertFalse(missing.exists())
+
+    def test_inherited_descriptor_is_never_downgraded_to_shared(self):
+        """flock is per open file description: LOCK_SH on the deployer's fd would downgrade its EX."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / 'lock'
+            lock.write_bytes(b''); lock.chmod(0o600)
+            calls, flock = self.flock_recorder()
+            deployer = os.open(lock, os.O_RDWR)
+            try:
+                cf.fcntl.flock(deployer, cf.fcntl.LOCK_EX | cf.fcntl.LOCK_NB)
+                with self.root_owned_lock(lock, flock):
+                    with cf.exclusive_lock(deployer, create=False, shared=True):
+                        pass
+                self.assertEqual(calls, [(deployer, cf.fcntl.LOCK_EX | cf.fcntl.LOCK_NB)])
+                # The deployer still holds EX afterwards: a shared reader is refused.
+                reader = os.open(lock, os.O_RDONLY)
+                try:
+                    self.assertRaises(BlockingIOError, cf.fcntl.flock, reader, cf.fcntl.LOCK_SH | cf.fcntl.LOCK_NB)
+                finally:
+                    os.close(reader)
+            finally:
+                os.close(deployer)
+
+    def test_guardian_and_inspection_share_while_deployment_and_verify_cohort_exclude(self):
+        """Real flock: guardian SH + inspection SH coexist; deployment EX / verify-cohort EX are exclusive."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / 'lock'
+            lock.write_bytes(b''); lock.chmod(0o600)
+            with self.root_owned_lock(lock):
+                guardian = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                deployer = os.open(lock, os.O_RDWR)
+                try:
+                    # Guardian (cloudfront-integrity-guard.py) holds LOCK_SH|LOCK_NB.
+                    cf.fcntl.flock(guardian, cf.fcntl.LOCK_SH | cf.fcntl.LOCK_NB)
+                    with cf.exclusive_lock(create=False, shared=True):
+                        with cf.exclusive_lock(create=False, shared=True):
+                            pass  # a second inspection shares too
+                        self.assertRaises(BlockingIOError, cf.fcntl.flock, deployer, cf.fcntl.LOCK_EX | cf.fcntl.LOCK_NB)
+                        self.assertRaises(cf.SyncError, cf.exclusive_lock().__enter__)
+                    cf.fcntl.flock(guardian, cf.fcntl.LOCK_UN)
+                    # Deployment holds EX: an inspection (and verify-cohort) is refused, never waits.
+                    cf.fcntl.flock(deployer, cf.fcntl.LOCK_EX | cf.fcntl.LOCK_NB)
+                    self.assertRaises(cf.SyncError, cf.exclusive_lock(create=False, shared=True).__enter__)
+                    self.assertRaises(cf.SyncError, cf.exclusive_lock().__enter__)
+                    cf.fcntl.flock(deployer, cf.fcntl.LOCK_UN)
+                    # verify-cohort holds EX: guardian and inspection are refused.
+                    with cf.exclusive_lock():
+                        self.assertRaises(BlockingIOError, cf.fcntl.flock, guardian, cf.fcntl.LOCK_SH | cf.fcntl.LOCK_NB)
+                        self.assertRaises(cf.SyncError, cf.exclusive_lock(create=False, shared=True).__enter__)
+                finally:
+                    os.close(guardian); os.close(deployer)
+
+    def test_main_lock_mode_per_command_and_descriptor_origin(self):
+        """Through main(): inspections SH on their own fd, EX on an inherited fd; verify-cohort EX (may create)."""
+        SH, EX = cf.fcntl.LOCK_SH | cf.fcntl.LOCK_NB, cf.fcntl.LOCK_EX | cf.fcntl.LOCK_NB
+        evidence = types.SimpleNamespace(disposition='private_namespace_empty', state=None, journal=None, state_files_read=True)
+        class NotApplicable:
+            def __init__(self, component): self.component = component
+        class Snapshotter:
+            def __init__(self, **kwargs): pass
+            def collect(self): return 'snapshot'
+        class ContextCollector:
+            def __init__(self, **kwargs): pass
+            def collect(self): return NotApplicable('context')
+        admission = types.SimpleNamespace(firewall=NotApplicable('firewall'), nginx=NotApplicable('nginx'))
+        helper = types.SimpleNamespace(read_private_state=mock.Mock(return_value=evidence), Snapshotter=Snapshotter,
+                                       ContextCollector=ContextCollector, NotApplicable=NotApplicable,
+                                       ComponentResult=type('ComponentResult', (), {}),
+                                       admit_snapshot=mock.Mock(return_value=admission))
+        for command, inherited, expected in (('inspect-state', False, SH), ('inspect-state', True, EX),
+                                             ('inspect-runtime', False, SH), ('inspect-runtime', True, EX),
+                                             ('verify-cohort', False, EX), ('verify-cohort', True, EX)):
+            with self.subTest(command=command, inherited=inherited), tempfile.TemporaryDirectory() as tmp:
+                lock = Path(tmp) / 'lock'
+                if command != 'verify-cohort' or inherited:
+                    lock.write_bytes(b''); lock.chmod(0o600)
+                calls, flock = self.flock_recorder()
+                fd = os.open(lock, os.O_RDWR) if inherited else None
+                try:
+                    argv = (['--lock-fd', str(fd)] if inherited else []) + [command]
+                    with (self.root_owned_lock(lock, flock), mock.patch.object(cf.os, 'geteuid', return_value=0),
+                          mock.patch.object(cf, '_bundle_runtime', return_value={'cloudfront_snapshot': helper}),
+                          mock.patch.object(cf, '_bundle_config', return_value=config()),
+                          contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+                        self.assertEqual(cf.main(argv), 0)
+                finally:
+                    if fd is not None:
+                        os.close(fd)
+                self.assertEqual([op for _fd, op in calls], [expected])
+                self.assertTrue(lock.exists())  # verify-cohort without a lock created it
+
+    def test_self_opened_lock_on_a_fifo_is_refused_without_blocking(self):
+        """A FIFO at the lock path never blocks the read-only open (O_NONBLOCK): sync_failed at once.
+
+        Run in a child process with a timeout: a blocking open would hang it
+        (O_RDONLY on a FIFO waits for a writer) instead of failing the test.
+        """
+        child = textwrap.dedent('''
+            import contextlib, importlib.util, io, os, sys
+            from pathlib import Path
+            from unittest import mock
+            spec = importlib.util.spec_from_file_location('cloudfront_sync', sys.argv[1])
+            cf = importlib.util.module_from_spec(spec); spec.loader.exec_module(cf)
+            lock = Path(sys.argv[2]); os.mkfifo(lock, 0o600)
+            with (mock.patch.object(cf, 'LOCK', lock), mock.patch.object(cf, 'check_path'),
+                  mock.patch.object(cf.os, 'geteuid', return_value=0),
+                  mock.patch.object(cf, '_bundle_runtime', side_effect=AssertionError('bundle')),
+                  mock.patch.object(cf, '_bundle_config', side_effect=AssertionError('config'))):
+                try:
+                    with cf.exclusive_lock(create=False, shared=True):
+                        sys.exit(3)
+                except cf.SyncError:
+                    pass
+                for command in ('inspect-state', 'inspect-runtime'):
+                    if cf.main([command]) != 1:
+                        sys.exit(4)
+        ''')
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                done = subprocess.run([sys.executable, '-B', '-c', child, str(MODULE_PATH), str(Path(tmp) / 'lock')],
+                                      capture_output=True, text=True, timeout=20)
+            except subprocess.TimeoutExpired:
+                self.fail('opening a FIFO lock blocked')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout, '')
+        self.assertEqual(done.stderr, (cf.canonical({'error': 'sync_failed'}) + '\n') * 2)
+
+    def test_lock_mode_must_be_exactly_0600(self):
+        """The lock is a root-owned 0600 file: 0400 or 0700 (no group/other bits either) is refused."""
+        for mode in (0o400, 0o700, 0o640, 0o4600):
+            for origin in ('shared', 'exclusive', 'inherited'):
+                if origin == 'exclusive' and not mode & 0o200 and os.geteuid() != 0:
+                    continue  # this non-root user could not open it O_RDWR at all (root can)
+                with self.subTest(mode=oct(mode), origin=origin), tempfile.TemporaryDirectory() as tmp:
+                    lock = Path(tmp) / 'lock'
+                    lock.write_bytes(b''); lock.chmod(0o600)
+                    fd = os.open(lock, os.O_RDONLY) if origin == 'inherited' else None
+                    lock.chmod(mode)
+                    try:
+                        with self.root_owned_lock(lock):
+                            with self.assertRaises(cf.SyncError):
+                                with cf.exclusive_lock(fd, create=origin == 'exclusive', shared=origin != 'exclusive'):
+                                    self.fail('entered with a lock of mode ' + oct(mode))
+                    finally:
+                        if fd is not None:
+                            os.close(fd)
+        # 0600 itself is accepted on every path.
+        for origin in ('shared', 'exclusive', 'inherited'):
+            with self.subTest(mode='0o600', origin=origin), tempfile.TemporaryDirectory() as tmp:
+                lock = Path(tmp) / 'lock'
+                lock.write_bytes(b''); lock.chmod(0o600)
+                fd = os.open(lock, os.O_RDONLY) if origin == 'inherited' else None
+                try:
+                    entered = []
+                    with self.root_owned_lock(lock):
+                        with cf.exclusive_lock(fd, create=origin == 'exclusive', shared=origin != 'exclusive'):
+                            entered.append(True)
+                    self.assertEqual(entered, [True])
+                finally:
+                    if fd is not None:
+                        os.close(fd)
 
     def test_secure_paths_reject_symlink_ownership_modes_and_shapes(self):
         def info(mode, uid=0):
@@ -559,7 +445,7 @@ class FilesystemTests(unittest.TestCase):
     def test_sticky_root_lock_directory_and_invalid_descriptor(self):
         lock = Path('/run/lock/cloudfront-sync.lock')
         parent = mock.Mock(st_mode=0o041777, st_uid=0, st_dev=1, st_ino=1)
-        file = mock.Mock(st_mode=0o100600, st_uid=0, st_dev=1, st_ino=2)
+        file = mock.Mock(st_mode=0o100600, st_uid=0, st_dev=1, st_ino=2, st_nlink=1)
         def lstat(path):
             return parent if path == lock.parent else file
         with mock.patch.object(cf, 'LOCK', lock), mock.patch.object(cf.Path, 'lstat', lstat), mock.patch.object(cf, 'check_path') as check, mock.patch.object(cf.os, 'fstat', return_value=file), mock.patch.object(cf.fcntl, 'flock'):
@@ -571,342 +457,1643 @@ class FilesystemTests(unittest.TestCase):
             file.st_mode = 0o100600; file.st_uid = 1000
             self.assertRaises(cf.SyncError, cf.exclusive_lock(7).__enter__)
 
-    def test_read_errors_size_and_atomic_failure_preserve_original(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'file'
-            path.write_text('oversize')
-            with mock.patch.object(cf, 'MAX_FILE', 1):
-                self.assertRaises(cf.SyncError, cf.read_text, path, secure=False)
-            path.write_bytes(b'\xff')
-            self.assertRaises(cf.SyncError, cf.read_text, path, secure=False)
-            path.write_text('old')
-            with mock.patch.object(cf.os, 'replace', side_effect=OSError('injected')):
-                self.assertRaises(OSError, cf.atomic_text, path, 'new')
-            self.assertEqual(path.read_text(), 'old')
-            self.assertEqual(list(Path(tmp).iterdir()), [path])
-
 
 class CliTests(unittest.TestCase):
-    def test_root_only_and_sanitized_cli_errors(self):
-        err = io.StringIO()
-        with mock.patch.object(cf.os, 'geteuid', return_value=501), contextlib.redirect_stderr(err):
-            self.assertEqual(cf.main(['preflight']), 1)
-        self.assertEqual(json.loads(err.getvalue()), {'error': 'sync_failed'})
+    def test_read_only_commands_are_root_only_with_sanitized_errors(self):
+        # main() converts every Exception into sync_failed, so a raising
+        # tripwire would be swallowed. The lock, bundle and config are
+        # recording mocks that would succeed; only the call record proves the
+        # root check ran first.
+        for command in sorted(READ_ONLY_COMMANDS):
+            with self.subTest(command=command):
+                err = io.StringIO()
+                with (mock.patch.object(cf.os, 'geteuid', return_value=501),
+                      mock.patch.object(cf, 'exclusive_lock', return_value=contextlib.nullcontext()) as lock,
+                      mock.patch.object(cf, '_bundle_runtime', return_value={}) as bundle,
+                      mock.patch.object(cf, '_bundle_config', return_value=config()) as read_config,
+                      contextlib.redirect_stderr(err)):
+                    self.assertEqual(cf.main([command]), 1)
+                lock.assert_not_called(); bundle.assert_not_called(); read_config.assert_not_called()
+                self.assertEqual(json.loads(err.getvalue()), {'error': 'sync_failed'})
 
-    def test_cli_plan_apply_sync_and_import_without_host_access(self):
+    def test_refused_commands_refuse_even_without_root_or_fixed_config(self):
+        for argv in (['preflight'], ['--config', '/etc/other-cloudfront-sync.json', 'plan']):
+            err = io.StringIO()
+            with mock.patch.object(cf.os, 'geteuid', return_value=501), contextlib.redirect_stderr(err):
+                self.assertEqual(cf.main(argv), 1)
+            self.assertEqual(json.loads(err.getvalue()), {'error': 'runtime_actor_not_connected'})
+
+    def test_cohort_verify_is_not_policy_success(self):
+        with (mock.patch.object(cf,'_bundle_runtime',return_value={}),mock.patch.object(cf,'_bundle_config',return_value=config()),
+              mock.patch.object(cf.os,'geteuid',return_value=0),mock.patch.object(cf,'exclusive_lock',return_value=contextlib.nullcontext())):
+            output=io.StringIO()
+            with contextlib.redirect_stdout(output):self.assertEqual(cf.main(['verify-cohort']),0)
+        result=json.loads(output.getvalue())
+        self.assertTrue(result['cohort_verified']);self.assertFalse(result['runtime_ready']);self.assertFalse(result['policy_verified'])
+
+    def test_inspect_state_is_sanitized_and_read_only(self):
+        evidence=types.SimpleNamespace(disposition='private_namespace_empty',state=None,journal=None,state_files_read=True)
+        helper=types.SimpleNamespace(read_private_state=mock.Mock(return_value=evidence))
+        private=Path('/var/lib/cloudfront-sync/private')
+        output=io.StringIO();error=io.StringIO()
+        # main() uses the modules _bundle_runtime() returns, nothing global.
+        with (mock.patch.object(cf,'_bundle_runtime',return_value={'cloudfront_snapshot':helper}),
+              mock.patch.object(cf,'_bundle_config',return_value=config()),
+              mock.patch.object(cf,'exclusive_lock',side_effect=lambda *a,**k:contextlib.nullcontext()) as lock,
+              mock.patch.object(cf.os,'geteuid',return_value=0),
+              contextlib.redirect_stdout(output),contextlib.redirect_stderr(error)):
+            self.assertEqual(cf.main(['inspect-state']),0)
+        lock.assert_called_once_with(None,create=False,shared=True)
+        helper.read_private_state.assert_called_once_with(str(private),owner=0,group=0)
+        result=json.loads(output.getvalue())
+        self.assertEqual(result,{'generation_id':cf.BUNDLE_GENERATION_ID,'inspection':'read_only_state_only',
+                                 'private_state_disposition':'private_namespace_empty','state_disposition':'absent',
+                                 'journal_disposition':'absent','runtime_ready':False})
+        self.assertEqual(error.getvalue(),'')
+
+    def test_readonly_lock_never_creates_missing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Path(tmp) / 'config.json'; cfg.write_text(json.dumps(config()))
-            root = Path(tmp) / 'state'
-            host = FakeHost()
-            def run(args):
-                out = io.StringIO(); err = io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    code = cf.main(['--config', str(cfg)] + args)
-                return code, json.loads(out.getvalue() or err.getvalue())
-            with mock.patch.object(cf, 'CONFIG', cfg), mock.patch.object(cf, 'STATE_DIR', root), mock.patch.object(cf, 'Host', return_value=host), mock.patch.object(cf.os, 'geteuid', return_value=0), mock.patch.object(cf, 'check_path'), mock.patch.object(cf, 'exclusive_lock', return_value=contextlib.nullcontext()):
-                self.assertEqual(run(['preflight'])[0], 0)
-                self.assertEqual(run(['sync']), (2, {'error': 'approval_required'}))
-                code, plan = run(['plan']); self.assertEqual(code, 0)
-                self.assertEqual(run(['apply', '--approve=' + plan['approve_token']])[0], 0)
-                self.assertEqual(run(['sync'])[0], 0)
-                self.assertEqual(run(['apply', '--approve=' + plan['approve_token']])[0], 1)
-                # A fresh host imports the previously created legacy permissions.
-                state = root / 'private' / 'state.json'; state.unlink()
-                host.rules = [cf.make_rule(r, 443, comment='legacy') for r in (V4, V6)]
-                legacy = Path(tmp) / 'legacy.json'; legacy.write_text(json.dumps({'ranges': [V4, V6]}))
-                code, plan = run(['import-plan', '--legacy-state', str(legacy)]); self.assertEqual(code, 0)
-                self.assertEqual(run(['import', '--approve=' + plan['approve_token']])[0], 0)
+            lock=Path(tmp)/'missing.lock'
+            with mock.patch.object(cf,'LOCK',lock),mock.patch.object(cf,'check_path'):
+                with self.assertRaises(FileNotFoundError):
+                    with cf.exclusive_lock(create=False):pass
+            self.assertFalse(lock.exists())
+
+    def test_inspect_runtime_hashes_the_config_only_for_a_data_state_baseline(self):
+        # Without a pt_state_data_only baseline nothing is compared, so the
+        # config is not hashed at all and admit_snapshot gets no hash.
+        class Result:
+            def __init__(self,status,code):self.status,self.code=status,code
+        class NotApplicable:
+            def __init__(self,component):self.component=component
+        class Snapshotter:
+            def __init__(self,**kwargs):pass
+            def collect(self):return 'snapshot'
+        class ContextCollector:
+            def __init__(self,**kwargs):pass
+            def collect(self):return NotApplicable('context')
+        legacy=types.SimpleNamespace(disposition='manual_legacy_or_unproven_state',baseline='not-a-baseline',
+                                     config_hash='a'*64,enrollment_id='b'*32)
+        for state in (None,legacy):
+            with self.subTest(state=state and state.disposition):
+                evidence=types.SimpleNamespace(disposition='private_namespace_empty' if state is None else legacy.disposition,
+                                               state=state,journal=None,state_files_read=True)
+                admission=types.SimpleNamespace(firewall=Result('failure','baseline_required'),
+                                                nginx=NotApplicable('nginx'))
+                module=types.SimpleNamespace(read_private_state=mock.Mock(return_value=evidence),
+                    Snapshotter=Snapshotter,ContextCollector=ContextCollector,NotApplicable=NotApplicable,
+                    ComponentResult=Result,admit_snapshot=mock.Mock(return_value=admission),
+                    config_hash=mock.Mock(side_effect=AssertionError('config hashed without a data-state baseline')))
+                output=io.StringIO();error=io.StringIO()
+                with (mock.patch.object(cf,'_bundle_runtime',return_value={'cloudfront_snapshot':module}),
+                      mock.patch.object(cf,'_bundle_config',return_value=config()),
+                      mock.patch.object(cf,'exclusive_lock',side_effect=lambda *a,**k:contextlib.nullcontext()),
+                      mock.patch.object(cf.os,'geteuid',return_value=0),
+                      contextlib.redirect_stdout(output),contextlib.redirect_stderr(error)):
+                    self.assertEqual(cf.main(['inspect-runtime']),0,error.getvalue())
+                module.config_hash.assert_not_called()
+                module.admit_snapshot.assert_called_once_with('snapshot',None,config_hash=None,enrollment_id=None,owner=0)
+                result=json.loads(output.getvalue())
+                self.assertEqual(result['firewall'],{'status':'failure','code':'baseline_required'})
+                self.assertEqual(error.getvalue(),'')
+
+    def test_inspect_runtime_is_readonly_and_reports_independent_components(self):
+        class Result:
+            def __init__(self,status,code):self.status,self.code=status,code
+        class NotApplicable:
+            def __init__(self,component):self.component=component
+        state=types.SimpleNamespace(disposition='pt_state_data_only',baseline='persisted-p',
+                                    config_hash='a'*64,enrollment_id='b'*32)
+        state_evidence=types.SimpleNamespace(disposition='pt_state_data_only',state=state,journal=None,state_files_read=True)
+        snapshot=object();snapshotters=[]
+        class Snapshotter:
+            def __init__(self,**kwargs):self.kwargs=kwargs;snapshotters.append(kwargs)
+            def collect(self):return snapshot
+        class ContextCollector:
+            def __init__(self,**kwargs):self.kwargs=kwargs
+            def collect(self):return types.SimpleNamespace(stable_raw=True)
+        admission=types.SimpleNamespace(firewall=Result('failure','baseline_context_mismatch'),
+                                        nginx=Result('failure','nginx_sandbox_unavailable'))
+        module_hash='d'*64
+        module=types.SimpleNamespace(read_private_state=mock.Mock(return_value=state_evidence),
+            Snapshotter=Snapshotter,ContextCollector=ContextCollector,NotApplicable=NotApplicable,
+            ComponentResult=Result,admit_snapshot=mock.Mock(return_value=admission),
+            config_hash=mock.Mock(return_value=module_hash))
+        output=io.StringIO();error=io.StringIO()
+        with (mock.patch.object(cf,'_bundle_runtime',return_value={'cloudfront_snapshot':module}),
+              mock.patch.object(cf,'_bundle_config',return_value=config()),
+              mock.patch.object(cf,'exclusive_lock',side_effect=lambda *a,**k:contextlib.nullcontext()) as lock,
+              mock.patch.object(cf.os,'geteuid',return_value=0),
+              contextlib.redirect_stdout(output),contextlib.redirect_stderr(error)):
+            self.assertEqual(cf.main(['inspect-runtime']),0)
+        lock.assert_called_once_with(None,create=False,shared=True)
+        module.read_private_state.assert_called_once_with('/var/lib/cloudfront-sync/private',owner=0,group=0)
+        # The hash is the bundle snapshot module's public config_hash, the one
+        # the ledger uses; the CLI has no canonicalization or hashing of its own.
+        module.config_hash.assert_called_once_with(config())
+        module.admit_snapshot.assert_called_once_with(mock.ANY,'persisted-p',
+                                                     config_hash=module_hash,
+                                                     enrollment_id='b'*32,owner=0)
+        result=json.loads(output.getvalue())
+        self.assertEqual(result['inspection'],'read_only_observation')
+        self.assertEqual(result['firewall'],{'status':'failure','code':'baseline_context_mismatch'})
+        self.assertEqual(result['nginx'],{'status':'failure','code':'nginx_sandbox_unavailable'})
+        self.assertEqual(result['context'],{'status':'observed_unverified','stable_raw':True})
+        # The config's nginx settings are passed as they are; nothing else.
+        self.assertEqual(snapshotters,[{'backend':'ufw','nginx_enabled':False,
+                                        'nginx_shared_dir':'/etc/nginx/cloudfront','nginx_bundles':[]}])
+        self.assertEqual(result['state'],'pt_state_data_only')
+        self.assertFalse(result['runtime_ready'])
+        self.assertEqual(error.getvalue(),'')
+
+    # Real bundle snapshot module, a real private namespace on disk (the fixed
+    # path/owner read_private_state receives is redirected to it) and backend
+    # none, whose firewall component is accepted only with a baseline.
+    RUNTIME_BASELINE_CODE = textwrap.dedent('''
+        import contextlib, io, importlib.util, json, os, sys, tempfile, types
+        from pathlib import Path
+        from unittest import mock
+        files = Path(sys.argv[1])
+        if sys.platform == 'linux' and os.geteuid() != 0 and hasattr(os, 'O_NOATIME'):
+            del os.O_NOATIME  # Linux refuses O_NOATIME on root-owned ancestors for non-root
+        for name in ('ufw_integrity', 'ufw_kernel', 'ufw_kernel_mapping', 'ufw_docker_kernel',
+                     'ufw_docker_transition', 'ufw_observation', 'nginx_observation', 'cloudfront_snapshot'):
+            module = types.ModuleType(name); module.__file__ = str(files / (name + '.py')); sys.modules[name] = module
+            exec(compile((files / (name + '.py')).read_bytes(), module.__file__, 'exec'), module.__dict__)
+        m = sys.modules['cloudfront_snapshot']
+        spec = importlib.util.spec_from_file_location('cli', files / 'cloudfront-sync.py')
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        config = {'host_address': '192.0.2.10', 'firewall': {'backend': 'none', 'ports': [443]},
+                  'nginx': {'enabled': False, 'shared_dir': '/etc/nginx/cloudfront', 'bundles': []},
+                  'limits': {'max_changes': 10, 'min_ratio': 0.8}, 'notify_unit': ''}
+        digest = m.config_hash(config)
+        def encoded(value):
+            return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+        p = {'integrity_format': m.FORMAT, 'backend': 'none', 'config_hash': digest, 'enrollment_id': 'b' * 32,
+             'profile_id': 'none', 'inventory': None, 'owned_rules': []}
+        state = encoded({'version': 2, 'integrity_format': m.FORMAT, 'generation_id': 'c' * 64, 'config_hash': digest,
+                         'enrollment_id': 'b' * 32, 'baseline': p, 'ranges': ['192.0.2.0/24'],
+                         'aws_sync_token': '11', 'last_success': None})
+        journal = encoded({'version': 2, 'journal_format': m.FORMAT, 'generation_id': 'c' * 64, 'config_hash': digest,
+                           'enrollment_id': 'b' * 32, 'transaction_id': 'd' * 64, 'phase': 'prepared',
+                           'frontier': 0, 'step_count': 0, 'baseline': p})
+        legacy_journal = encoded({'version': 1, 'config_hash': digest})
+        cases = {'state_only': {'state.json': state},
+                 'state_and_journal': {'state.json': state, 'journal.json': journal},
+                 'state_and_pending': {'state.json': state, 'pending.json': b'{"version":1}'},
+                 'state_and_legacy_journal': {'state.json': state, 'journal.json': legacy_journal}}
+        owner = os.geteuid()
+        tmp_root = str(Path('/tmp').resolve())
+        rows = {}
+        for label, names in cases.items():
+            with tempfile.TemporaryDirectory(dir=tmp_root) as td:
+                private = Path(td) / 'private'; private.mkdir(mode=0o700)
+                for name, raw in names.items():
+                    (private / name).write_bytes(raw); (private / name).chmod(0o600)
+                group = os.stat(private).st_gid
+                proxy = types.SimpleNamespace(**vars(m))
+                proxy.read_private_state = lambda path, **kw: m.read_private_state(private, owner=owner, group=group)
+                proxy.config_hash = mock.Mock(wraps=m.config_hash)
+                proxy.admit_snapshot = mock.Mock(wraps=m.admit_snapshot)
+                output, error = io.StringIO(), io.StringIO()
+                with (mock.patch.object(cli, '_bundle_runtime', return_value={'cloudfront_snapshot': proxy}),
+                      mock.patch.object(cli, '_bundle_config', return_value=config),
+                      mock.patch.object(cli, 'exclusive_lock', side_effect=lambda *a, **k: contextlib.nullcontext()),
+                      mock.patch.object(cli.os, 'geteuid', return_value=0),
+                      contextlib.redirect_stdout(output), contextlib.redirect_stderr(error)):
+                    code = cli.main(['inspect-runtime'])
+                result = json.loads(output.getvalue()) if code == 0 else None
+                call = proxy.admit_snapshot.call_args
+                rows[label] = {'code': code, 'error': error.getvalue(),
+                               'private_state': result and result['private_state'], 'state': result and result['state'],
+                               'firewall': result and result['firewall'],
+                               'hashed': proxy.config_hash.call_count,
+                               'baseline_passed': call is not None and call.args[1] is not None,
+                               'hash_passed': call is not None and call.kwargs['config_hash'] is not None,
+                               'enrollment_passed': call is not None and call.kwargs['enrollment_id'] is not None}
+        print(json.dumps(rows))
+    ''')
+
+    def test_inspect_runtime_uses_the_state_baseline_only_when_the_namespace_is_data_only(self):
+        """The baseline is admitted only for private_state disposition pt_state_data_only.
+
+        A v2 state next to a journal (recognized or legacy) or a pending
+        companion is a manual namespace: the firewall is not admitted from that
+        state's baseline and the config is not hashed.
+        """
+        done = subprocess.run([sys.executable, '-I', '-B', '-c', self.RUNTIME_BASELINE_CODE, str(MODULE_PATH.parent)],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        rows = json.loads(done.stdout)
+        # Control: the same v2 state alone is a data-only namespace and its
+        # baseline (with the config hash) is what admits the none backend.
+        self.assertEqual(rows['state_only'], {'code': 0, 'error': '', 'private_state': 'pt_state_data_only',
+                                              'state': 'pt_state_data_only',
+                                              'firewall': {'status': 'not_applicable', 'component': 'firewall'},
+                                              'hashed': 1, 'baseline_passed': True, 'hash_passed': True,
+                                              'enrollment_passed': True})
+        for label, disposition in (('state_and_journal', 'manual_ledger_not_connected'),
+                                   ('state_and_pending', 'pending_or_companion_manual'),
+                                   ('state_and_legacy_journal', 'manual_legacy_pending')):
+            with self.subTest(case=label):
+                self.assertEqual(rows[label], {'code': 0, 'error': '', 'private_state': disposition,
+                                               'state': 'pt_state_data_only',
+                                               'firewall': {'status': 'failure', 'code': 'baseline_required'},
+                                               'hashed': 0, 'baseline_passed': False, 'hash_passed': False,
+                                               'enrollment_passed': False})
 
 
-class SafetyBoundaryTests(unittest.TestCase):
-    def test_limits_exact_10_11_and_family_80_percent(self):
-        old4 = [f'198.51.{i}.0/24' for i in range(5)]
-        old6 = [f'2001:db8:{i}::/48' for i in range(5)]
-        limits = {'max_changes': 10, 'min_ratio': .8}
-        self.assertTrue(cf.within_limits(old4 + old6, old4[:4] + old6[:4], limits))
-        self.assertFalse(cf.within_limits(old4 + old6, old4[:3] + old6, limits))
-        additions = [f'203.0.{i}.0/24' for i in range(11)]
-        self.assertTrue(cf.within_limits(old4 + old6, old4 + old6 + additions[:10], limits))
-        self.assertFalse(cf.within_limits(old4 + old6, old4 + old6 + additions, limits))
+    # The real bundle snapshot module reads real private namespaces; both
+    # inspections report what that one read decided about state.json and
+    # journal.json.
+    STATE_REPORT_CODE = textwrap.dedent('''
+        import contextlib, io, importlib.util, json, os, sys, tempfile, types
+        from pathlib import Path
+        from unittest import mock
+        files = Path(sys.argv[1])
+        if sys.platform == 'linux' and os.geteuid() != 0 and hasattr(os, 'O_NOATIME'):
+            del os.O_NOATIME  # Linux refuses O_NOATIME on root-owned ancestors for non-root
+        for name in ('ufw_integrity', 'ufw_kernel', 'ufw_kernel_mapping', 'ufw_docker_kernel',
+                     'ufw_docker_transition', 'ufw_observation', 'nginx_observation', 'cloudfront_snapshot'):
+            module = types.ModuleType(name); module.__file__ = str(files / (name + '.py')); sys.modules[name] = module
+            exec(compile((files / (name + '.py')).read_bytes(), module.__file__, 'exec'), module.__dict__)
+        m = sys.modules['cloudfront_snapshot']
+        spec = importlib.util.spec_from_file_location('cli', files / 'cloudfront-sync.py')
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        config = {'host_address': '192.0.2.10', 'firewall': {'backend': 'none', 'ports': [443]},
+                  'nginx': {'enabled': False, 'shared_dir': '/etc/nginx/cloudfront', 'bundles': []},
+                  'limits': {'max_changes': 10, 'min_ratio': 0.8}, 'notify_unit': ''}
+        legacy_state = b'{"initialized":true,"version":1}'
+        legacy_journal = b'{"version":1}'
+        cases = {'directory_absent': None, 'empty': {}, 'state_only': {'state.json': legacy_state},
+                 'pending_only': {'pending.json': b'{"version":1}'},
+                 'unknown_only': {'stray': b'x'},
+                 'unknown_with_state_and_journal': {'stray': b'x', 'state.json': legacy_state,
+                                                    'journal.json': legacy_journal}}
+        owner = os.geteuid()
+        tmp_root = str(Path('/tmp').resolve())
+        rows = {}
+        for label, names in cases.items():
+            with tempfile.TemporaryDirectory(dir=tmp_root) as td:
+                private = Path(td) / 'private'
+                if names is not None:
+                    private.mkdir(mode=0o700)
+                    for name, raw in names.items():
+                        (private / name).write_bytes(raw); (private / name).chmod(0o600)
+                group = os.stat(td).st_gid
+                proxy = types.SimpleNamespace(**vars(m))
+                proxy.read_private_state = lambda path, **kw: m.read_private_state(private, owner=owner, group=group)
+                for command in ('inspect-state', 'inspect-runtime'):
+                    output, error = io.StringIO(), io.StringIO()
+                    with (mock.patch.object(cli, '_bundle_runtime', return_value={'cloudfront_snapshot': proxy}),
+                          mock.patch.object(cli, '_bundle_config', return_value=config),
+                          mock.patch.object(cli, 'exclusive_lock', side_effect=lambda *a, **k: contextlib.nullcontext()),
+                          mock.patch.object(cli.os, 'geteuid', return_value=0),
+                          contextlib.redirect_stdout(output), contextlib.redirect_stderr(error)):
+                        code = cli.main([command])
+                    result = json.loads(output.getvalue()) if code == 0 else {'code': code, 'error': error.getvalue()}
+                    keys = (('private_state_disposition', 'state_disposition', 'journal_disposition')
+                            if command == 'inspect-state' else ('private_state', 'state', 'journal'))
+                    rows.setdefault(label, {})[command] = [result.get(key, result) for key in keys]
+        print(json.dumps(rows))
+    ''')
 
-    def fixture(self, folder):
-        return cf.Engine(config(), Path(folder), FakeHost(), clock=lambda: 1000)
+    # Expected [private state, state, journal] per namespace, the same for
+    # inspect-state and inspect-runtime.
+    STATE_REPORTS = {
+        'directory_absent': ['private_directory_absent', 'absent', 'absent'],
+        'empty': ['private_namespace_empty', 'absent', 'absent'],
+        'state_only': ['manual_legacy_or_unproven_state', 'manual_legacy_or_unproven_state', 'absent'],
+        'pending_only': ['pending_or_companion_manual', 'absent', 'absent'],
+        # Only listed, never read: state.json and journal.json may exist.
+        'unknown_only': ['unknown_private_entries_manual', 'not_read', 'not_read'],
+        'unknown_with_state_and_journal': ['unknown_private_entries_manual', 'not_read', 'not_read'],
+    }
 
-    def journal(self, engine):
-        before = engine.host.snapshot(engine.config)
-        return {'version': 1, 'config_hash': cf.digest(engine.config), 'before': before, 'old_state': engine.state(),
-                'target_rules': engine.state()['owned_rules'], 'target_nginx': before['nginx'], 'new_state': None}
+    def test_inspections_report_not_read_unless_the_files_were_read_or_proven_absent(self):
+        """'absent' only when state.json/journal.json is known not to exist; 'not_read' when never read."""
+        done = subprocess.run([sys.executable, '-I', '-B', '-c', self.STATE_REPORT_CODE, str(MODULE_PATH.parent)],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        rows = json.loads(done.stdout)
+        for label, expected in self.STATE_REPORTS.items():
+            for command in ('inspect-state', 'inspect-runtime'):
+                with self.subTest(case=label, command=command):
+                    self.assertEqual(rows[label][command], expected)
 
-    def test_wrong_host_or_ssh_guard_blocks_recovery_before_mutation(self):
+    def test_readme_states_when_state_and_journal_are_absent_or_not_read(self):
+        readme = ' '.join((MODULE_PATH.parents[1] / 'README.md').read_text().split())
+        for row in ('| `private_directory_absent` | the directory does not exist | `absent` | `absent` |',
+                    '| `unknown_private_entries_manual` | listed only, no file read | `not_read` | `not_read` |',
+                    '| any other disposition | every file read and parsed | the parsed disposition, or `absent` when the file does not exist | the parsed disposition, or `absent` when the file does not exist |'):
+            with self.subTest(row=row):
+                self.assertIn(row, readme)
+
+    def test_inspections_never_report_absent_for_an_unread_namespace(self):
+        """A fake reader result that read nothing (state_files_read False) is never 'absent'."""
+        class NotApplicable:
+            def __init__(self, component): self.component = component
+        class Snapshotter:
+            def __init__(self, **kwargs): pass
+            def collect(self): return 'snapshot'
+        class ContextCollector:
+            def __init__(self, **kwargs): pass
+            def collect(self): return NotApplicable('context')
+        for read, expected in ((False, 'not_read'), (True, 'absent')):
+            evidence = types.SimpleNamespace(disposition='some_disposition', state=None, journal=None,
+                                             state_files_read=read)
+            admission = types.SimpleNamespace(firewall=NotApplicable('firewall'), nginx=NotApplicable('nginx'))
+            module = types.SimpleNamespace(read_private_state=mock.Mock(return_value=evidence),
+                Snapshotter=Snapshotter, ContextCollector=ContextCollector, NotApplicable=NotApplicable,
+                ComponentResult=type('Result', (), {}), admit_snapshot=mock.Mock(return_value=admission),
+                config_hash=mock.Mock(side_effect=AssertionError('hashed')))
+            for command, keys in (('inspect-state', ('state_disposition', 'journal_disposition')),
+                                  ('inspect-runtime', ('state', 'journal'))):
+                with self.subTest(read=read, command=command):
+                    output, error = io.StringIO(), io.StringIO()
+                    with (mock.patch.object(cf, '_bundle_runtime', return_value={'cloudfront_snapshot': module}),
+                          mock.patch.object(cf, '_bundle_config', return_value=config()),
+                          mock.patch.object(cf, 'exclusive_lock', side_effect=lambda *a, **k: contextlib.nullcontext()),
+                          mock.patch.object(cf.os, 'geteuid', return_value=0),
+                          contextlib.redirect_stdout(output), contextlib.redirect_stderr(error)):
+                        self.assertEqual(cf.main([command]), 0, error.getvalue())
+                    result = json.loads(output.getvalue())
+                    self.assertEqual([result[key] for key in keys], [expected, expected])
+
+
+READ_ONLY_COMMANDS = frozenset({'verify-cohort', 'inspect-state', 'inspect-runtime'})
+REFUSED_COMMANDS = {'preflight': [], 'plan': [], 'sync': [], 'apply': ['--approve=private-token'],
+                    'import': ['--approve=private-token'], 'import-plan': ['--legacy-state=/root/not-read.json']}
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+
+# Host-effect entry points. Names a platform lacks (e.g. os.spawnlp on some
+# builds) are skipped, never silently replaced by a weaker check.
+FORBIDDEN_SUBPROCESS = ('run', 'Popen', 'call', 'check_call', 'check_output', 'getoutput', 'getstatusoutput')
+FORBIDDEN_OS = ('system', 'popen', 'replace', 'rename', 'renames', 'mkdir', 'makedirs', 'unlink', 'remove', 'rmdir',
+                'removedirs', 'chmod', 'fchmod', 'lchmod', 'chown', 'fchown', 'lchown', 'symlink', 'link',
+                'truncate', 'ftruncate', 'fork', 'forkpty', 'kill', 'killpg', 'utime',
+                'write', 'writev', 'pwrite', 'pwritev', 'sendfile', 'copy_file_range', 'splice',
+                'posix_fallocate', 'setxattr', 'removexattr', 'chflags', 'lchflags', 'chroot',
+                'execl', 'execle', 'execlp', 'execlpe', 'execv', 'execve', 'execvp', 'execvpe',
+                'spawnl', 'spawnle', 'spawnlp', 'spawnlpe', 'spawnv', 'spawnve', 'spawnvp', 'spawnvpe',
+                'posix_spawn', 'posix_spawnp', 'mkfifo', 'mknod',
+                # Descriptor redirection, credentials, environment and scheduling
+                # change the process or what its children inherit.
+                'dup', 'dup2', 'setuid', 'seteuid', 'setgid', 'setegid', 'setreuid', 'setregid',
+                'setresuid', 'setresgid', 'setgroups', 'initgroups', 'putenv', 'unsetenv',
+                'nice', 'setpriority', 'sched_setaffinity', 'sched_setparam', 'sched_setscheduler',
+                'setsid', 'setpgid', 'setpgrp', 'tcsetpgrp', 'login_tty',
+                # Namespaces (Linux, Python 3.12+); os has no mount API.
+                'unshare', 'setns')
+FORBIDDEN_SHUTIL = ('copy', 'copy2', 'copyfile', 'copymode', 'copystat', 'copytree', 'move', 'rmtree', 'chown')
+FORBIDDEN_SOCKET = ('socket', 'create_connection')
+FORBIDDEN_URLLIB = ('urlopen',)
+# copy/copy_into/move/move_into exist from Python 3.14. Path.open,
+# write_text and write_bytes reach io.open, which the guard also checks.
+FORBIDDEN_PATH = ('mkdir', 'write_text', 'write_bytes', 'touch', 'unlink', 'rmdir', 'symlink_to',
+                  'hardlink_to', 'link_to', 'chmod', 'lchmod', 'rename', 'replace',
+                  'copy', 'copy_into', 'move', 'move_into')
+
+
+def forbidden_targets():
+    for module, names in ((subprocess, FORBIDDEN_SUBPROCESS), (os, FORBIDDEN_OS), (shutil, FORBIDDEN_SHUTIL),
+                          (socket, FORBIDDEN_SOCKET), (urllib.request, FORBIDDEN_URLLIB), (Path, FORBIDDEN_PATH)):
+        for name in names:
+            if hasattr(module, name):
+                yield module, name
+
+
+class HostEffectAttempt(BaseException):
+    """Raised by the guard. BaseException, so main()'s ``except Exception`` cannot swallow it."""
+
+
+@contextlib.contextmanager
+def no_host_effects():
+    """Fail on any process start, filesystem mutation, network use or writable open.
+
+    Every attempt is recorded *and* raises HostEffectAttempt. The record is
+    checked on exit, so even code that catches BaseException cannot hide one.
+    """
+    real_open, real_os_open = open, os.open
+    attempts = []
+    def refuse(name):
+        attempts.append(name)
+        raise HostEffectAttempt('forbidden host effect: ' + name)
+    def forbidden(name):
+        return lambda *args, **kwargs: refuse(name)
+    def guarded_open(file, mode='r', *args, **kwargs):
+        if any(flag in mode for flag in 'wax+'):
+            refuse('writable open')
+        return real_open(file, mode, *args, **kwargs)
+    def guarded_os_open(path, flags, *args, **kwargs):
+        if flags & _WRITE_FLAGS:
+            refuse('writable os.open')
+        return real_os_open(path, flags, *args, **kwargs)
+    with contextlib.ExitStack() as stack:
+        for target, name in forbidden_targets():
+            stack.enter_context(mock.patch.object(target, name, side_effect=forbidden(name)))
+        stack.enter_context(mock.patch('builtins.open', guarded_open))
+        stack.enter_context(mock.patch.object(io, 'open', guarded_open))
+        stack.enter_context(mock.patch.object(os, 'open', guarded_os_open))
+        yield attempts
+    if attempts:
+        raise AssertionError('forbidden host effects attempted: ' + ', '.join(attempts))
+
+
+def cli_subcommands():
+    """The subcommands of the real parser main() uses (and prints in --help)."""
+    actions = [a for a in cf.build_parser()._actions if isinstance(a, cf.argparse._SubParsersAction)]
+    return frozenset(actions[0].choices)
+
+
+_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_BLOCKS = tuple(getattr(ast, name) for name in ('If', 'Try', 'TryStar', 'With', 'AsyncWith', 'For', 'AsyncFor',
+                                                'While', 'Match') if hasattr(ast, name))
+
+
+def _bound_names(target):
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _bound_names(element)
+    elif isinstance(target, ast.Starred):
+        yield from _bound_names(target.value)
+
+
+def module_definitions(tree):
+    """(name, node) for every module-scope binding, in source order.
+
+    Covers def/async def/class, plain, annotated and augmented assignments, and
+    for/with targets, including those nested in module-level if/try/with/for/
+    while/match blocks (never inside a function or class body).
+    """
+    rows, pending = [], list(tree.body)
+    while pending:
+        node = pending.pop(0)
+        if isinstance(node, _DEFINITIONS):
+            rows.append((node.name, node))
+            continue
+        if isinstance(node, ast.Assign):
+            rows.extend((name, node) for target in node.targets for name in _bound_names(target))
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            rows.extend((name, node) for name in _bound_names(node.target))
+        if isinstance(node, _BLOCKS):
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                rows.extend((name, node) for name in _bound_names(node.target))
+            for item in getattr(node, 'items', ()):
+                if item.optional_vars is not None:
+                    rows.extend((name, node) for name in _bound_names(item.optional_vars))
+            blocks = [getattr(node, field, []) for field in ('body', 'orelse', 'finalbody')]
+            blocks += [handler.body for handler in getattr(node, 'handlers', ())]
+            blocks += [case.body for case in getattr(node, 'cases', ())]
+            pending[:0] = [statement for block in blocks for statement in block]
+    return sorted(rows, key=lambda row: (row[1].lineno, row[1].col_offset))
+
+
+def reachable_from_main(tree):
+    """Module-scope definitions (see module_definitions) that main names, transitively.
+
+    A name bound more than once (e.g. in both branches of a module-level if)
+    reaches every binding. Scope: this file only; the bundle helper modules
+    are covered by test_bundle_modules_open_read_only and their own tests.
+    """
+    defs = {}
+    for name, node in module_definitions(tree):
+        defs.setdefault(name, []).append(node)
+    reached, pending = {}, ['main']
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        nodes = defs[name]
+        reached[name] = nodes[0] if len(nodes) == 1 else ast.Module(body=list(nodes), type_ignores=[])
+        pending.extend(n.id for node in nodes for n in ast.walk(node) if isinstance(n, ast.Name) and n.id in defs)
+    return reached
+
+
+_OS_MODULES = ('os', '_bg_os')
+_READ_ONLY_OPEN_FLAGS = frozenset({'O_RDONLY', 'O_DIRECTORY', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_NOATIME', 'O_CLOEXEC'})
+# The only creating/writable os.open reachable from main(): verify-cohort's
+# lock file. Any other non-read-only os.open, or flags that cannot be read
+# statically, fails test_code_reachable_from_main_opens_only_read_only.
+ALLOWED_WRITABLE_OPENS = (('exclusive_lock', frozenset({'O_RDWR', 'O_NOFOLLOW', 'O_CREAT'})),)
+
+
+def _is_optional_flag(node, modules):
+    """getattr(os, 'O_NOATIME', 0): an optional flag spelled as data."""
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'getattr'
+            and len(node.args) == 3 and not node.keywords
+            and isinstance(node.args[0], ast.Name) and node.args[0].id in modules
+            and isinstance(node.args[1], ast.Constant) and type(node.args[1].value) is str
+            and node.args[1].value.startswith('O_')
+            and isinstance(node.args[2], ast.Constant) and node.args[2].value == 0)
+
+
+def _open_flag_names(node, modules=_OS_MODULES):
+    """Flag names of a literal flags expression, or None when not statically known."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left, right = _open_flag_names(node.left, modules), _open_flag_names(node.right, modules)
+        return None if left is None or right is None else left | right
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
+        return frozenset({node.attr}) if node.attr.startswith('O_') else None
+    if _is_optional_flag(node, modules):
+        return frozenset({node.args[1].value})
+    return None
+
+
+def os_open_calls(reached, modules=_OS_MODULES):
+    """(definition, flag names or None) for every os.open call (any alias in ``modules``)."""
+    calls = []
+    for name, definition in reached.items():
+        for item in ast.walk(definition):
+            if (isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == 'open'
+                    and isinstance(item.func.value, ast.Name) and item.func.value.id in modules):
+                flags = item.args[1] if len(item.args) > 1 else next(
+                    (k.value for k in item.keywords if k.arg == 'flags'), None)
+                calls.append((name, None if flags is None else _open_flag_names(flags, modules)))
+    return calls
+
+
+def unexpected_opens(reached):
+    """Opens that are neither provably read-only nor the single allowlisted lock open."""
+    calls = os_open_calls(reached)
+    allowed = [call for call in calls if call in ALLOWED_WRITABLE_OPENS]
+    other = [call for call in calls if call not in ALLOWED_WRITABLE_OPENS
+             and (call[1] is None or not call[1] <= _READ_ONLY_OPEN_FLAGS)]
+    if len(allowed) != len(ALLOWED_WRITABLE_OPENS):
+        other.append(('allowlisted lock open count', len(allowed)))
+    # Builtin/io/pathlib opens and descriptor wrappers bypass the flag check.
+    for name, definition in reached.items():
+        for item in ast.walk(definition):
+            if isinstance(item, ast.Call) and (
+                    (isinstance(item.func, ast.Name) and item.func.id in ('open', 'fdopen'))
+                    or (isinstance(item.func, ast.Attribute) and item.func.attr == 'fdopen')
+                    or (isinstance(item.func, ast.Attribute) and item.func.attr == 'open'
+                        and not (isinstance(item.func.value, ast.Name) and item.func.value.id in _OS_MODULES))):
+                other.append((name, 'non-os open'))
+    return other
+
+
+def host_effect_references(reached):
+    """Static host-effect API references in ``reached``: (definition, line, api)."""
+    os_names = set(FORBIDDEN_OS)
+    # str.replace(old, new[, count]) has two or more positional arguments;
+    # Path.replace(target) has one. Every other use of .replace is flagged.
+    string_replace = {id(node.func) for definition in reached.values() for node in ast.walk(definition)
+                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                      and node.func.attr == 'replace' and len(node.args) >= 2}
+    offenders = []
+    for name, node in reached.items():
+        for item in ast.walk(node):
+            if isinstance(item, ast.Name) and item.id in ('subprocess', 'shutil', 'socket', 'urllib', 'tempfile'):
+                offenders.append((name, item.lineno, item.id))
+            elif isinstance(item, ast.Attribute):
+                owner = item.value.id if isinstance(item.value, ast.Name) else None
+                if owner in _OS_MODULES and item.attr in os_names:
+                    offenders.append((name, item.lineno, owner + '.' + item.attr))
+                elif item.attr == 'replace' and id(item) in string_replace:
+                    continue
+                elif item.attr in FORBIDDEN_PATH or item.attr in FORBIDDEN_URLLIB + ('build_opener',):
+                    offenders.append((name, item.lineno, item.attr))
+    return offenders
+
+
+class RuntimeActorRefusalTests(unittest.TestCase):
+    """S0 characterization: only read commands run; every actor path stops before host effects."""
+
+    def read_cli(self, argv):
+        # Read commands need a verified bundle and the lock; both are stubbed
+        # here and covered for real by test_entry_generation.
+        output, error = io.StringIO(), io.StringIO()
+        with (mock.patch.object(cf, '_bundle_runtime', return_value={}),
+              mock.patch.object(cf, '_bundle_config', return_value=config()),
+              mock.patch.object(cf.os, 'geteuid', return_value=0),
+              mock.patch.object(cf, 'exclusive_lock', side_effect=lambda *a, **k: contextlib.nullcontext()),
+              no_host_effects(), contextlib.redirect_stdout(output), contextlib.redirect_stderr(error)):
+            code = cf.main(argv)
+        return code, output.getvalue(), error.getvalue()
+
+    def refused_cli(self, argv, euid):
+        """Run main with the REAL lock/bundle/config functions (spied, not replaced)."""
+        output, error = io.StringIO(), io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
-            engine = self.fixture(tmp)
-            engine.apply(engine.plan()['approve_token'])
-            cf.atomic_json(engine.private / 'journal.json', self.journal(engine))
-            before = engine.host.snapshot(engine.config)
-            previous = len(engine.host.actions)
-            with mock.patch.object(engine.host, 'check_target', side_effect=cf.SyncError('wrong host or SSH conflict')):
-                self.assertRaises(cf.SyncError, engine.preflight)
-            self.assertEqual(engine.host.snapshot(engine.config), before)
-            self.assertEqual(len(engine.host.actions), previous)
-            self.assertEqual(engine.host.stops, 0)
+            lock = Path(tmp) / 'cloudfront-sync.lock'
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(cf, 'LOCK', lock))
+                spies = {name: stack.enter_context(mock.patch.object(cf, name, wraps=getattr(cf, name)))
+                         for name in ('exclusive_lock', 'check_path', '_bundle_runtime', '_bundle_config',
+                                      'validate_config')}
+                if euid is not None:
+                    stack.enter_context(mock.patch.object(cf.os, 'geteuid', return_value=euid))
+                for context in (no_host_effects(), contextlib.redirect_stdout(output), contextlib.redirect_stderr(error)):
+                    stack.enter_context(context)
+                code = cf.main(argv)
+            for name, spy in spies.items():
+                self.assertEqual(spy.call_count, 0, name)
+            self.assertFalse(lock.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+        self.assertIsNone(cf._BUNDLE_RUNTIME)
+        return code, output.getvalue(), error.getvalue()
 
-    def test_corrupt_journal_disables_timer_without_overwriting(self):
+    def test_every_cli_subcommand_is_classified(self):
+        self.assertEqual(cli_subcommands(), READ_ONLY_COMMANDS | frozenset(REFUSED_COMMANDS))
+        self.assertEqual(cf.READ_ONLY_COMMANDS, READ_ONLY_COMMANDS)
+        self.assertEqual(cf.REFUSED_COMMANDS, frozenset(REFUSED_COMMANDS))
+
+    def test_non_read_cli_commands_refuse_before_lock_bundle_config_or_any_host_effect(self):
+        for command, extra in REFUSED_COMMANDS.items():
+            for euid in (None, 0):
+                with self.subTest(command=command, euid='actual' if euid is None else euid):
+                    code, output, error = self.refused_cli([command, *extra], euid)
+                    self.assertEqual(code, 1)
+                    self.assertEqual(output, '')
+                    self.assertEqual(json.loads(error), {'error': 'runtime_actor_not_connected'})
+                    self.assertNotIn('private-token', error)
+
+    def test_verify_cohort_stays_read_only_under_the_same_guard(self):
+        code, output, error = self.read_cli(['verify-cohort'])
+        self.assertEqual(code, 0)
+        self.assertEqual(error, '')
+        self.assertFalse(json.loads(output)['runtime_ready'])
+
+    def test_guard_detects_every_forbidden_effect(self):
         with tempfile.TemporaryDirectory() as tmp:
-            engine = self.fixture(tmp)
-            engine.apply(engine.plan()['approve_token'])
-            before = engine.host.snapshot(engine.config)
-            (engine.private / 'journal.json').write_text('not json')
-            self.assertRaises(cf.SyncError, engine.preflight)
-            self.assertEqual(engine.host.stops, 1)
-            self.assertTrue(engine.status()['recovery_failed'])
-            self.assertEqual(engine.host.snapshot(engine.config), before)
-            self.assertEqual((engine.private / 'journal.json').read_text(), 'not json')
+            target = str(Path(tmp) / 'x')
+            # Every attempt is a lambda so the patched attribute is looked up
+            # inside the guard (a captured real function would really run).
+            attempts = {
+                'os.remove': lambda: os.remove(target), 'os.rmdir': lambda: os.rmdir(tmp),
+                'os.chmod': lambda: os.chmod(tmp, 0o700), 'os.symlink': lambda: os.symlink(tmp, target),
+                'os.truncate': lambda: os.truncate(target, 0), 'os.fork': lambda: os.fork(),
+                'os.execv': lambda: os.execv('/bin/true', ['true']),
+                'os.posix_spawn': lambda: os.posix_spawn('/bin/true', ['true'], {}),
+                'os.mkfifo': lambda: os.mkfifo(target), 'shutil.rmtree': lambda: shutil.rmtree(tmp),
+                'shutil.copy': lambda: shutil.copy(tmp, target), 'shutil.move': lambda: shutil.move(tmp, target),
+                'socket.socket': lambda: socket.socket(), 'socket.create_connection': lambda: socket.create_connection(('192.0.2.1', 443)),
+                'urlopen': lambda: urllib.request.urlopen('https://192.0.2.1/'),
+                'subprocess.run': lambda: subprocess.run(['true']), 'open(w)': lambda: open(target, 'w'),
+                'os.open(O_CREAT)': lambda: os.open(target, os.O_RDONLY | os.O_CREAT),
+                'Path.mkdir': lambda: Path(target).mkdir(),
+                # Harmless even unguarded: signal 0, a bad descriptor, a missing path.
+                'os.kill': lambda: os.kill(os.getpid(), 0), 'os.killpg': lambda: os.killpg(os.getpgrp(), 0),
+                'os.write': lambda: os.write(-1, b''), 'os.utime': lambda: os.utime(target),
+                'Path.replace': lambda: Path(target).replace(target + '.moved'),
+            }
+            if hasattr(os, 'popen'):
+                attempts['os.popen'] = lambda: os.popen('true')
+            if hasattr(os, 'dup2'):
+                attempts['os.dup2'] = lambda: os.dup2(-1, -1)
+            if hasattr(os, 'setuid'):
+                attempts['os.setuid'] = lambda: os.setuid(os.getuid())
+            attempts['os.putenv'] = lambda: os.putenv('CF_GUARD_TEST', '1')
+            attempts['os.environ'] = lambda: os.environ.__setitem__('CF_GUARD_TEST', '1')
+            attempts['Path.open(w)'] = lambda: Path(target).open('w')
+            attempts['os.fdopen(w)'] = lambda: os.fdopen(-1, 'w')
+            for name in ('copy', 'move'):
+                if hasattr(Path, name):  # Python 3.14+
+                    attempts['Path.' + name] = lambda name=name: getattr(Path(tmp), name)(target)
+            with self.assertRaisesRegex(AssertionError, 'forbidden host effects attempted'):
+                with no_host_effects() as recorded:
+                    # Nothing real may run: refuse to attempt anything unless
+                    # every forbidden target is replaced by the tripwire.
+                    unguarded = [module.__name__ + '.' + name for module, name in forbidden_targets()
+                                 if not isinstance(getattr(module, name), mock.Mock)]
+                    self.assertEqual(unguarded, [])
+                    for name, attempt in attempts.items():
+                        with self.subTest(effect=name), self.assertRaisesRegex(HostEffectAttempt, 'forbidden host effect'):
+                            attempt()
+                    # A swallowing `except Exception` cannot catch the tripwire.
+                    try:
+                        os.remove(target)
+                    except Exception:
+                        self.fail('HostEffectAttempt was caught by except Exception')
+                    except HostEffectAttempt:
+                        pass
+            self.assertEqual(len(recorded), len(attempts) + 1)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+        self.assertNotIn('CF_GUARD_TEST', os.environ)
 
-    def test_verify_after_refuses_missing_duplicate_foreign_rules_or_files(self):
+    def test_forbidden_lists_cover_process_credential_environment_and_new_path_apis(self):
+        required_os = {'popen', 'dup', 'dup2', 'setuid', 'seteuid', 'setgid', 'setegid', 'setreuid', 'setregid',
+                       'setresuid', 'setresgid', 'setgroups', 'initgroups', 'putenv', 'unsetenv', 'nice',
+                       'setpriority', 'sched_setaffinity', 'sched_setparam', 'sched_setscheduler'}
+        required_path = {'copy', 'copy_into', 'move', 'move_into', 'hardlink_to', 'symlink_to', 'touch', 'chmod',
+                         'lchmod', 'rename', 'replace', 'unlink', 'rmdir', 'write_text', 'write_bytes', 'mkdir'}
+        self.assertLessEqual(required_os, set(FORBIDDEN_OS))
+        self.assertLessEqual(required_path, set(FORBIDDEN_PATH))
+        # Every os.set*/os.sched_set* function this interpreter has is listed
+        # (descriptor flag setters excepted: they change no host or process state).
+        setters = {name for name in dir(os) if name.startswith(('set', 'sched_set'))
+                   and name not in ('set_blocking', 'set_inheritable') and callable(getattr(os, name))}
+        self.assertLessEqual(setters, set(FORBIDDEN_OS))
+        # The installed pathlib's writers are all guarded (3.14 adds copy/move).
+        targets = list(forbidden_targets())
+        for name in FORBIDDEN_PATH:
+            if hasattr(Path, name):
+                self.assertIn((Path, name), targets)
+        # Path.open and os.fdopen in a write mode reach the checked io.open.
+        with self.assertRaisesRegex(AssertionError, 'forbidden host effects attempted: writable open'):
+            with no_host_effects():
+                for mode in ('w', 'a', 'x', 'r+'):
+                    with self.subTest(mode=mode), self.assertRaises(HostEffectAttempt):
+                        Path('/nonexistent-cf-guard').open(mode)
+                with self.assertRaises(HostEffectAttempt):
+                    os.fdopen(-1, 'w')
+
+    def test_guard_reports_attempts_hidden_by_a_base_exception_handler(self):
+        with self.assertRaisesRegex(AssertionError, 'forbidden host effects attempted: fork'):
+            with no_host_effects():
+                try:
+                    os.fork()
+                except BaseException:
+                    pass
+
+    def test_host_actor_and_engine_refuse_before_any_input_or_bundle_check(self):
         with tempfile.TemporaryDirectory() as tmp:
-            engine = self.fixture(tmp)
-            engine.apply(engine.plan()['approve_token'])
-            state = engine.state(); before = state['snapshot']; owned = state['owned_rules']
-            missing = cf.copy.deepcopy(before); missing['rules'].pop()
-            self.assertRaises(cf.SyncError, engine._verify_after, before, missing, owned, owned, {})
-            duplicate = cf.copy.deepcopy(before); duplicate['rules'].append(owned[0])
-            self.assertRaises(cf.SyncError, engine._verify_after, before, duplicate, owned, owned, {})
-            foreign = cf.copy.deepcopy(before); foreign['rules'].append(cf.make_rule('203.0.113.0/24', 8443, 'admin'))
-            self.assertRaises(cf.SyncError, engine._verify_after, before, foreign, owned, owned, {})
-            changed = cf.copy.deepcopy(before); changed['bundles']['/etc/nginx/server.conf'] = 'changed'
-            self.assertRaises(cf.SyncError, engine._verify_after, before, changed, owned, owned, {})
+            state = Path(tmp) / 'state'
+            injected = types.SimpleNamespace(name='injected-host')
+            geo = {'cloudfront-geo.conf': '192.0.2.0/24 1;\n'}
+            # Positional, keyword, missing and surplus arguments: the refusal
+            # never depends on the call shape (no TypeError path).
+            shapes = (((), {}), ((['ufw', 'enable'],), {}), ((), {'args': ['ufw', 'enable']}),
+                      ((['ufw', 'enable'], 'extra'), {'timeout': 5}), ((config(), geo), {}),
+                      ((), {'config': config(), 'files': geo}), ((config(), geo, 'extra'), {'unexpected': True}),
+                      ((config(), state, injected), {}), ((config(),), {'state_dir': state, 'host': cf.Host(), 'clock': None}),
+                      (({'invalid': 1}, None, None, None, 'extra'), {'other': 1}))
+            calls = {'Host.command': lambda *a, **k: cf.Host().command(*a, **k),
+                     'Host.write_nginx': lambda *a, **k: cf.Host().write_nginx(*a, **k),
+                     'Engine': lambda *a, **k: cf.Engine(*a, **k)}
+            with (mock.patch.object(cf, 'validate_config') as validated, mock.patch.object(cf, 'check_path') as checked,
+                  mock.patch.object(cf, '_bundle_runtime') as bundle, mock.patch.object(cf, '_bundle_config') as read_config,
+                  no_host_effects()):
+                for label, call in calls.items():
+                    for args, kwargs in shapes:
+                        with self.subTest(call=label, args=len(args), kwargs=sorted(kwargs)):
+                            with self.assertRaises(cf.SyncError) as caught:
+                                call(*args, **kwargs)
+                            self.assertEqual(str(caught.exception), 'runtime_actor_not_connected')
+                            self.assertIsNone(caught.exception.__context__)
+            for spy in (validated, checked, bundle, read_config):
+                spy.assert_not_called()
+            self.assertFalse(state.exists())
 
-    def test_rollback_refuses_foreign_nginx_and_unknown_owned_rules(self):
+    # Every definition outside the fixed bundle entry stub, by reachability.
+    # Reached from main(): read path (verify-cohort/inspect-state/inspect-runtime)
+    # and the lock/config gate it runs first.
+    RETAINED_REACHABLE = frozenset({'CONFIG', 'LOCK', 'READ_ONLY_COMMANDS', 'REFUSED_COMMANDS', 'GLOBAL_OPTIONS',
+                                    'HELP_OPTIONS', 'lock_fd_number', 'SyncError', 'canonical', 'snapshot_config_hash', 'safe_path',
+                                    'validate_config', 'check_path', 'exclusive_lock', 'ArgumentRejected',
+                                    'FixedErrorParser', 'build_parser', 'main'})
+    # Kept unreachable on purpose: explicit refusal points C4 replaces.
+    RETAINED_REFUSAL_POINTS = frozenset({'Host', 'Engine'})
+
+    def test_removed_actor_surface_stays_removed(self):
+        tree = ast.parse(MODULE_PATH.read_text())
+        stub_end = next(i for i, line in enumerate(MODULE_PATH.read_text().splitlines(), 1)
+                        if line == '# END FIXED BUNDLE ENTRY STUB')
+        defined = {name for name, node in module_definitions(tree) if node.lineno > stub_end}
+        self.assertEqual(defined, self.RETAINED_REACHABLE | self.RETAINED_REFUSAL_POINTS)
+        reached = set(reachable_from_main(tree))
+        self.assertTrue(self.RETAINED_REACHABLE <= reached)
+        self.assertFalse(self.RETAINED_REFUSAL_POINTS & reached)
+        self.assertEqual({name for name in vars(cf.Host) if not name.startswith('__')}, {'command', 'write_nginx'})
+        self.assertEqual({name for name in vars(cf.Engine) if not name.startswith('__')}, set())
+
+    def test_no_statement_follows_a_refusal_or_return(self):
+        """Deleting one raise/return must never revive dead actor code."""
+        tree = ast.parse(MODULE_PATH.read_text())
+        dead = []
+        for node in ast.walk(tree):
+            for field in ('body', 'orelse', 'finalbody'):
+                block = getattr(node, field, None)
+                if isinstance(block, list):
+                    dead.extend(statement.lineno for statement, following in zip(block, block[1:])
+                                if isinstance(statement, (ast.Raise, ast.Return, ast.Continue, ast.Break)))
+        self.assertEqual(dead, [])
+
+    def test_cli_module_never_imports_subprocess(self):
+        tree = ast.parse(MODULE_PATH.read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split('.')[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or '').split('.')[0])
+        self.assertNotIn('subprocess', imported)
+        # No dynamic import either (__import__/importlib with the name as data).
+        self.assertFalse([n.lineno for n in ast.walk(tree) if isinstance(n, ast.Constant) and n.value == 'subprocess'])
+
+    def test_code_reachable_from_main_references_no_host_effect_api(self):
+        """Static complement of no_host_effects(): covers branches the CLI tests do not execute."""
+        reached = reachable_from_main(ast.parse(MODULE_PATH.read_text()))
+        # The actor refusal points and the AWS fetcher are not reachable at all.
+        self.assertFalse({'Host', 'Engine'} & set(reached))
+        self.assertEqual(host_effect_references(reached), [])
+
+    def test_static_host_effect_scan_flags_new_apis_and_path_replace(self):
+        """Self-test of the static scan, including str.replace vs Path.replace."""
+        def scan(source):
+            tree = ast.parse(textwrap.dedent(source))
+            return [row[2] for row in host_effect_references({node.name: node for node in tree.body})]
+        self.assertEqual(scan("def f(text):\n    return text.replace('a', 'b')\n"), [])
+        for call in ('os.kill(pid, 15)', 'os.killpg(pgid, 15)', 'os.utime(path)', 'os.write(fd, data)',
+                     'os.writev(fd, parts)', 'os.pwrite(fd, data, 0)', 'os.setxattr(path, k, v)',
+                     'os.removexattr(path, k)', 'os.sendfile(a, b, 0, 1)', 'os.copy_file_range(a, b, 1)',
+                     '_bg_os.kill(pid, 9)', 'Path(path).replace(target)', 'path.replace(target)',
+                     'mover = path.replace', 'Path(path).rename(target)', 'subprocess.run(argv)',
+                     'os.popen(command)', 'os.dup2(a, b)', 'os.setuid(0)', 'os.setresgid(0, 0, 0)',
+                     'os.putenv(k, v)', 'os.unsetenv(k)', 'os.nice(1)', 'os.sched_setaffinity(0, cpus)',
+                     'Path(path).copy(target)', 'path.copy_into(directory)', 'path.move(target)',
+                     'path.move_into(directory)', 'path.hardlink_to(target)', 'path.touch()'):
+            with self.subTest(call=call):
+                self.assertNotEqual(scan('def f():\n    ' + call + '\n'), [])
+
+    def test_code_reachable_from_main_opens_only_read_only(self):
+        """os.open is a host effect too: only the verify-cohort lock may create/write."""
+        reached = reachable_from_main(ast.parse(MODULE_PATH.read_text()))
+        calls = os_open_calls(reached)
+        self.assertIn(ALLOWED_WRITABLE_OPENS[0], calls)
+        self.assertIn(('exclusive_lock', frozenset({'O_RDONLY', 'O_NOFOLLOW', 'O_NONBLOCK'})), calls)
+        self.assertEqual(unexpected_opens(reached), [])
+
+    def test_open_analyzer_rejects_writable_unknown_and_duplicate_opens(self):
+        """Self-test of the static open check on synthetic definitions."""
+        def analyze(source):
+            tree = ast.parse(textwrap.dedent(source))
+            return unexpected_opens({node.name: node for node in tree.body})
+        lock = """
+            def exclusive_lock():
+                os.open(LOCK, os.O_RDWR|os.O_NOFOLLOW|os.O_CREAT, 0o600)
+            """
+        self.assertEqual(analyze(lock + """
+            def reader():
+                _bg_os.open(name, _bg_os.O_RDONLY|_bg_os.O_NOFOLLOW|getattr(_bg_os,'O_NOATIME',0), dir_fd=fd)
+            """), [])
+        for bad in ("os.open(path, os.O_WRONLY|os.O_TRUNC)", "os.open(path, os.O_RDONLY|os.O_CREAT)",
+                    "_bg_os.open(path, flags=_bg_os.O_APPEND)", "os.open(path, flags)", "os.open(path)",
+                    "os.open(path, os.O_RDONLY|getattr(os,'O_TRUNC',0))", "open(path, 'r')",
+                    "Path(path).open()", "os.fdopen(fd, 'w')"):
+            with self.subTest(call=bad):
+                self.assertNotEqual(analyze(lock + "\n            def other():\n                " + bad + "\n"), [])
+        # The allowlisted lock open itself must exist exactly once, unchanged.
+        self.assertNotEqual(analyze(lock.replace('|os.O_CREAT', '|os.O_CREAT|os.O_TRUNC')), [])
+        self.assertNotEqual(analyze(lock + lock.replace('exclusive_lock', 'second_lock')), [])
+        self.assertNotEqual(analyze("def nothing():\n    pass\n"), [])
+
+
+SECRET = 'cf-argv-secret-0123456789'
+
+
+class ArgvContractTests(unittest.TestCase):
+    """Refusal, unknown commands and argv errors print one fixed code and never echo argv."""
+
+    def run_main(self, argv, euid=None):
+        output, error = io.StringIO(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            spies = {name: stack.enter_context(mock.patch.object(cf, name, wraps=getattr(cf, name)))
+                     for name in ('build_parser', 'exclusive_lock', 'check_path', '_bundle_runtime',
+                                  '_bundle_config', 'validate_config')}
+            parse = stack.enter_context(mock.patch.object(cf.argparse.ArgumentParser, 'parse_args',
+                                                          autospec=True, side_effect=cf.argparse.ArgumentParser.parse_args))
+            geteuid = stack.enter_context(mock.patch.object(cf.os, 'geteuid', return_value=0 if euid is None else euid))
+            for context in (no_host_effects(), contextlib.redirect_stdout(output), contextlib.redirect_stderr(error)):
+                stack.enter_context(context)
+            code = cf.main(argv)
+        calls = {name: spy.call_count for name, spy in spies.items()}
+        calls['parse_args'], calls['geteuid'] = parse.call_count, geteuid.call_count
+        return code, output.getvalue(), error.getvalue(), calls
+
+    def refused_argvs(self):
+        for command, required in REFUSED_COMMANDS.items():
+            required = [arg.replace('private-token', SECRET) for arg in required]
+            yield [command, *required]
+            yield [command]                                     # required option missing
+            yield [command, *required, '--unknown=' + SECRET, SECRET]  # surplus secret arguments
+            yield [command, '--approve', SECRET, '--legacy-state=' + SECRET]
+            yield ['--config', '/root/' + SECRET, '--lock-fd=' + SECRET, command, *required]  # global options first
+            # -h/--help never turn a refusal into usage: the refusal wins.
+            yield ['--config=' + SECRET, command, '--help']
+            yield ['-h', command, *required]
+            yield [command, '-h']
+            yield ['--help', '--lock-fd', SECRET, command, SECRET]
+            yield ['--lock-fd', SECRET, '-h', command]
+            # Anywhere, not only as the subcommand: after a read-only command,
+            # after unknown tokens or '--', and as an option value.
+            yield ['verify-cohort', command]
+            yield ['inspect-state', '--config', command]
+            yield [SECRET, '--x=' + SECRET, command, 'inspect-runtime']
+            yield ['--', command]
+            yield ['--lock-fd', command]
+            yield ['--config', command, 'verify-cohort']
+
+    def test_refused_commands_are_never_parsed_in_any_argv_shape(self):
+        for argv in self.refused_argvs():
+            with self.subTest(argv=argv):
+                code, output, error, calls = self.run_main(argv)
+                self.assertEqual((code, output, error), (1, '', '{"error":"runtime_actor_not_connected"}\n'))
+                self.assertEqual(calls, dict.fromkeys(calls, 0))
+
+    def test_a_refused_name_inside_an_equals_option_is_left_to_argparse(self):
+        """Only whole tokens refuse; ``--config=apply`` is an option value that argparse handles."""
+        for argv, expected in ((['--config=apply'], (2, 'unknown_command')),
+                               (['--config=plan', 'verify-cohort'], (1, 'sync_failed')),
+                               (['verify-cohort', '--approve=apply'], (2, 'invalid_arguments'))):
+            with self.subTest(argv=argv):
+                code, output, error, calls = self.run_main(argv, euid=501)
+                self.assertEqual((code, output, error), (expected[0], '', canonical_error(expected[1])))
+                self.assertEqual(calls['exclusive_lock'], 0)
+
+    def test_argparse_alone_selects_the_read_only_command(self):
+        """A read-only name as an option value is the value; the parsed subcommand runs."""
+        for argv in (['--config', 'verify-cohort', 'inspect-state'], ['--config=inspect-runtime', 'verify-cohort']):
+            with self.subTest(argv=argv):
+                parsed = cf.build_parser().parse_args(argv)
+                self.assertEqual(parsed.command, argv[-1])
+                code, output, error, calls = self.run_main(argv, euid=501)
+                self.assertEqual((code, output, error), (1, '', canonical_error('sync_failed')))
+                self.assertEqual((calls['parse_args'], calls['geteuid']), (1, 1))
+
+    def test_unknown_or_missing_commands_print_a_fixed_code_without_parsing(self):
+        for argv in ([], [SECRET], ['bogus', '--approve=' + SECRET], ['--bogus=' + SECRET, 'Plan'],
+                     ['--config'], ['--config=' + SECRET], ['--lock-fd', SECRET], ['--', 'bogus'],
+                     ['Plan'], ['inspect'], ['-x', SECRET], ['--config=apply'], ['verify-cohort=1'],
+                     # -h/--help not alone, without a read-only command token.
+                     ['-h', 'bogus'], ['-h', '-h'], ['--help', '--help'], ['-h', SECRET], ['-hh'],
+                     ['--help=' + SECRET], ['-h', '--', 'bogus'], ['--he']):
+            with self.subTest(argv=argv):
+                code, output, error, calls = self.run_main(argv)
+                self.assertEqual((code, output, error), (2, '', '{"error":"unknown_command"}\n'))
+                self.assertEqual(calls, dict.fromkeys(calls, 0))
+
+    def test_read_command_argument_errors_print_a_fixed_code_before_root_check(self):
+        for argv in (['inspect-state', '--x=' + SECRET], ['verify-cohort', SECRET],
+                     ['inspect-runtime', '--config', SECRET], ['--lock-fd=' + SECRET, 'verify-cohort'],
+                     ['--lock-fd', SECRET, 'inspect-state'], ['--config', '--lock-fd', 'inspect-state'],
+                     ['inspect-state', '--approve=' + SECRET], ['verify-cohort', 'inspect-state'],
+                     ['--conf', SECRET, 'inspect-state'],
+                     # A global option without its value takes the subcommand
+                     # token as its value: the subcommand is then missing.
+                     ['--lock-fd', 'verify-cohort'], ['--config', 'inspect-state'],
+                     # -h/--help with a read-only command is an argument error, not usage.
+                     ['verify-cohort', '-h'], ['-h', 'verify-cohort'], ['--help', 'inspect-state'],
+                     ['inspect-runtime', '--help'], ['--config=' + SECRET, '--help', 'inspect-runtime'],
+                     ['verify-cohort', SECRET, '-h'], ['--config', '-h', 'verify-cohort'],
+                     ['verify-cohort', '-hh'], ['verify-cohort', '--he'],
+                     # --lock-fd must be a non-negative decimal integer.
+                     ['--lock-fd=-1', 'inspect-state'], ['--lock-fd', '-1', 'verify-cohort'],
+                     ['--lock-fd=-3', 'inspect-runtime'], ['--lock-fd=1.5', 'inspect-state'],
+                     ['--lock-fd=', 'verify-cohort'], ['--lock-fd=+3', 'inspect-state'],
+                     ['--lock-fd= 3', 'inspect-state'], ['--lock-fd=0x3', 'verify-cohort'],
+                     # ... of at most 10 digits.
+                     ['--lock-fd=' + '1' * 11, 'inspect-state'], ['--lock-fd', '0' * 11, 'verify-cohort'],
+                     ['--lock-fd=' + '7' * 4301, 'inspect-runtime']):
+            with self.subTest(argv=argv):
+                code, output, error, calls = self.run_main(argv)
+                self.assertEqual((code, output, error), (2, '', '{"error":"invalid_arguments"}\n'))
+                self.assertEqual(calls['geteuid'], 0)
+                for name in ('exclusive_lock', 'check_path', '_bundle_runtime', '_bundle_config', 'validate_config'):
+                    self.assertEqual(calls[name], 0, name)
+
+    def test_valid_read_command_argv_shapes_reach_the_root_check(self):
+        for argv in (['inspect-state'], ['--config', str(cf.CONFIG), 'verify-cohort'],
+                     ['--config=' + str(cf.CONFIG), '--lock-fd', '3', 'inspect-runtime'], ['--lock-fd=0', 'inspect-state'],
+                     ['--lock-fd', '007', 'verify-cohort'], ['--lock-fd', '9' * 10, 'inspect-state']):
+            with self.subTest(argv=argv):
+                code, output, error, calls = self.run_main(argv, euid=501)
+                self.assertEqual((code, output, error), (1, '', '{"error":"sync_failed"}\n'))
+                self.assertEqual(calls['parse_args'], 1)
+                self.assertEqual(calls['geteuid'], 1)
+                self.assertEqual(calls['exclusive_lock'], 0)
+
+    def test_lock_fd_parses_only_non_negative_decimal_integers(self):
+        parser = cf.build_parser()
+        for value, expected in (('0', 0), ('3', 3), ('007', 7), ('4096', 4096), ('9' * 10, 9999999999),
+                                ('0' * 10, 0), ('0' * 9 + '5', 5)):
+            with self.subTest(value=value):
+                self.assertEqual(parser.parse_args(['--lock-fd', value, 'inspect-state']).lock_fd, expected)
+        # At most 10 digits: longer values (with leading zeros, too, and far
+        # past int()'s 4300-digit string limit) are rejected by their length.
+        for value in ('-1', '-0', '+3', '1.5', '', ' 3', '3 ', '0x3', '1_0', '\u0663', SECRET,
+                      '1' * 11, '0' * 11, '0' * 10 + '1', '9' * 4300, '1' * 4301, '0' * 5000):
+            with self.subTest(value=value), self.assertRaises(cf.ArgumentRejected):
+                parser.parse_args(['--lock-fd=' + value, 'inspect-state'])
+        self.assertIsNone(parser.parse_args(['inspect-state']).lock_fd)
+
+    def test_a_non_negative_lock_fd_that_is_not_the_held_lock_is_sync_failed(self):
+        """0 or more parses; a descriptor that is not open, or not the lock file, fails at run time (exit 1)."""
         with tempfile.TemporaryDirectory() as tmp:
-            engine = self.fixture(tmp)
-            engine.apply(engine.plan()['approve_token'])
-            j = self.journal(engine)
-            engine.host.nginx = {'cloudfront-geo.conf': 'unknown config'}
-            j['before']['nginx'] = {'cloudfront-geo.conf': 'old config'}
-            j['target_nginx'] = {'cloudfront-geo.conf': 'new config'}
-            self.assertRaises(cf.SyncError, engine._rollback, j)
-            engine.host.nginx.clear()
-            j = self.journal(engine)
-            engine.host.rules.append(cf.make_rule('203.0.113.0/24', 443))
-            self.assertRaises(cf.SyncError, engine._rollback, j)
-            self.assertEqual(engine.host.nginx, {})
-            j['config_hash'] = 'changed'
-            self.assertRaises(cf.SyncError, engine._rollback, j)
+            lock, other = Path(tmp) / 'lock', Path(tmp) / 'other'
+            for path in (lock, other):
+                path.write_bytes(b''); path.chmod(0o600)
+            real_fstat, real_lstat = os.fstat, cf.Path.lstat
+            # Tests run unprivileged: present the files as root-owned only.
+            def as_root(st):
+                return mock.Mock(st_mode=st.st_mode, st_uid=0, st_dev=st.st_dev, st_ino=st.st_ino, st_nlink=st.st_nlink)
+            lock_fd, other_fd = os.open(lock, os.O_RDWR), os.open(other, os.O_RDONLY)
+            closed = os.open(other, os.O_RDONLY); os.close(closed)  # a free descriptor number
+            try:
+                for fd, reaches_bundle in ((closed, False), (other_fd, False), (lock_fd, True)):
+                    for command in ('verify-cohort', 'inspect-state', 'inspect-runtime'):
+                        with self.subTest(fd=('closed', 'other', 'lock')[(closed, other_fd, lock_fd).index(fd)], command=command):
+                            output, error = io.StringIO(), io.StringIO()
+                            with (mock.patch.object(cf, 'LOCK', lock), mock.patch.object(cf, 'check_path'),
+                                  mock.patch.object(cf.os, 'geteuid', return_value=0),
+                                  mock.patch.object(cf.os, 'fstat', side_effect=lambda f: as_root(real_fstat(f))),
+                                  mock.patch.object(cf.Path, 'lstat', lambda p: as_root(real_lstat(p))),
+                                  mock.patch.object(cf, '_bundle_runtime', side_effect=cf.BundleEntryError('stop')) as bundle,
+                                  contextlib.redirect_stdout(output), contextlib.redirect_stderr(error)):
+                                code = cf.main(['--lock-fd', str(fd), command])
+                            self.assertEqual((code, output.getvalue(), error.getvalue()), (1, '', canonical_error('sync_failed')))
+                            self.assertEqual(bundle.call_count, 1 if reaches_bundle else 0)
+            finally:
+                os.close(lock_fd); os.close(other_fd)
 
-    def test_partial_delete_and_crash_before_state_commit_restore_old_rules(self):
+    def test_help_only_for_a_sole_help_token_and_lists_every_command(self):
+        for argv in (['--help'], ['-h']):
+            with self.subTest(argv=argv):
+                code, output, error, calls = self.run_main(argv)
+                self.assertEqual((code, error), (0, ''))
+                # Exactly the parser's usage text: nothing else (no argv) is printed.
+                self.assertEqual(output, cf.build_parser().format_help())
+                # The S0 verifier's own usage parser discovers every command,
+                # while no refused command's (removed) options are shown.
+                self.assertEqual(s0_verifier()[0].parse_subcommands(output), READ_ONLY_COMMANDS | frozenset(REFUSED_COMMANDS))
+                for option in ('--approve', '--legacy-state'):
+                    self.assertNotIn(option, output)
+                self.assertEqual(calls['parse_args'], 0)
+                self.assertEqual(calls['geteuid'], 0)
+        # Anything else with -h/--help is never usage (exit 0).
+        for argv in (['--config=' + SECRET, '--help'], ['--lock-fd', SECRET, '-h'], ['-h', '-h'],
+                     ['verify-cohort', '-h'], ['-h', 'plan']):
+            with self.subTest(argv=argv):
+                code, output, error, calls = self.run_main(argv)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(output, '')
+                self.assertNotIn(SECRET, error)
+
+    def test_help_text_and_readme_state_the_same_outcome_table(self):
+        """The module docstring (printed by --help) lists the README table's cases, in order.
+
+        Same exit codes and codes in the same (first match decides) order,
+        the same parenthesized case details and the same -h/--help clauses;
+        each case is then checked against main() with a representative argv.
+        """
+        readme = (MODULE_PATH.parents[1] / 'README.md').read_text()
+        rows = re.findall(r'^\| (.+?) \| ([0-9]) \| `\{"error":"([a-z_]+)"\}` \|$', readme, re.MULTILINE)
+        doc = ' '.join(cf.__doc__.split())
+        clauses = re.findall(r'exit ([0-9]) ([a-z_]+): (.*?)(?= exit [0-9] [a-z_]+:| Production has )', doc)
+        self.assertEqual([(int(rc), code) for _, rc, code in rows], [(int(rc), code) for rc, code, _ in clauses])
+        self.assertEqual([code for _, _, code in rows],
+                         ['runtime_actor_not_connected', 'unknown_command', 'invalid_arguments', 'sync_failed'])
+        self.assertIn('Usage is printed (exit 0) only when the whole argv is -h or --help.', doc)
+        self.assertIn('Usage is printed (exit 0) only when the whole argv is `-h` or `--help`.',
+                      ' '.join(readme.split()))
+        for (case, _, code), (_, _, clause) in zip(rows, clauses):
+            with self.subTest(code=code):
+                case = case.replace('`', '')
+                self.assertEqual(re.findall(r'\(([^)]*)\)', case), re.findall(r'\(([^)]*)\)', clause))
+                for phrase in ('-h/--help', 'unless it is the whole argv'):
+                    self.assertEqual(phrase in case, phrase in clause, phrase)
+        # --lock-fd: only its syntax is an argument error; an fd that parses
+        # but is not the open lock file fails at run time.
+        lock_fd_phrases = {'invalid_arguments': '--lock-fd not a non-negative decimal integer of at most 10 digits',
+                           'sync_failed': '--lock-fd not an open descriptor of the lock file'}
+        for (case, _, code), (_, _, clause) in zip(rows, clauses):
+            with self.subTest(code=code, lock_fd=True):
+                case = case.replace('`', '')
+                self.assertEqual('--lock-fd' in clause, code in lock_fd_phrases)
+                self.assertEqual('--lock-fd' in case, code in lock_fd_phrases)
+                if code in lock_fd_phrases:
+                    self.assertIn(lock_fd_phrases[code], clause)
+                    self.assertIn(lock_fd_phrases[code], case)
+        # The help text states what main() does.
+        examples = {'runtime_actor_not_connected': (['plan', '-h'], ['-h', 'plan'], ['--help', 'apply', SECRET]),
+                    'unknown_command': (['-h', SECRET], ['--help', '-h'], ['bogus', '--help'], []),
+                    'invalid_arguments': (['verify-cohort', '-h'], ['--help', 'inspect-state'],
+                                          ['inspect-runtime', '--x=' + SECRET], ['--lock-fd=-1', 'inspect-state'],
+                                          ['--lock-fd', SECRET, 'verify-cohort'], ['--lock-fd=' + '1' * 11, 'inspect-state']),
+                    'sync_failed': (['verify-cohort'], ['--lock-fd=0', 'inspect-state'])}
+        for (rc, code, _) in clauses:
+            for argv in examples[code]:
+                with self.subTest(code=code, argv=argv):
+                    exit_code, output, error, _ = self.run_main(argv, euid=501)
+                    self.assertEqual((exit_code, output, error), (int(rc), '', canonical_error(code)))
+
+    def test_main_returns_for_every_argv_shape_and_never_exits(self):
+        """No parser has a help action and every argparse error raises ArgumentRejected."""
+        pool = ('-h', '--help', '-hh', '--he', '--help=x', '--config', '--config=' + SECRET, '--lock-fd',
+                '--lock-fd=3', '--lock-fd=' + SECRET, 'verify-cohort', 'inspect-state', 'plan', 'apply',
+                'bogus', '--', '-', '--approve=' + SECRET, SECRET)
+        fixed = {'{"error":"%s"}\n' % code for code in ('runtime_actor_not_connected', 'unknown_command',
+                                                         'invalid_arguments', 'sync_failed')}
+        shapes = [()] + [(a,) for a in pool] + [(a, b) for a in pool for b in pool] \
+            + [(a, b, c) for a in pool for b in pool for c in pool[::3]]
+        with (mock.patch.object(cf.os, 'geteuid', return_value=501), no_host_effects()):
+            for argv in shapes:
+                output, error = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                    try:
+                        code = cf.main(list(argv))
+                    except SystemExit:
+                        self.fail('main() exited for %r' % (argv,))
+                if list(argv) in (['-h'], ['--help']):
+                    self.assertEqual((code, error.getvalue()), (0, ''))
+                    continue
+                with self.subTest(argv=argv):
+                    self.assertIn(code, (1, 2))
+                    self.assertEqual(output.getvalue(), '')
+                    self.assertIn(error.getvalue(), fixed)
+
+    def test_no_parser_has_a_help_action_and_refused_subparsers_define_no_options(self):
+        parser = cf.build_parser()
+        subparsers = [a for a in parser._actions if isinstance(a, cf.argparse._SubParsersAction)][0]
+        for name, sub in [('', parser), *subparsers.choices.items()]:
+            with self.subTest(parser=name):
+                self.assertFalse(sub.add_help)
+                self.assertFalse([a for a in sub._actions if isinstance(a, cf.argparse._HelpAction)])
+                if name:
+                    # No subcommand defines an option: required options of the
+                    # refused commands (--approve, --legacy-state) are gone.
+                    self.assertEqual([a.option_strings for a in sub._actions if a.option_strings], [])
+        self.assertEqual(set(subparsers.choices), cf.READ_ONLY_COMMANDS | cf.REFUSED_COMMANDS)
+
+    def test_the_parser_has_exactly_the_fixed_global_options(self):
+        """No option beyond GLOBAL_OPTIONS; each stores exactly one value."""
+        options = [a for a in cf.build_parser()._actions if a.option_strings]
+        self.assertEqual([s for a in options for s in a.option_strings], [name for name, _ in cf.GLOBAL_OPTIONS])
+        self.assertEqual([name for name, _ in cf.GLOBAL_OPTIONS], ['--config', '--lock-fd'])
+        for action in options:
+            with self.subTest(option=action.option_strings):
+                self.assertIsNone(action.nargs)
+                self.assertIsInstance(action, cf.argparse._StoreAction)
+
+    def test_every_parser_and_subparser_reports_errors_only_by_exception(self):
+        parser = cf.build_parser()
+        subparsers = [a for a in parser._actions if isinstance(a, cf.argparse._SubParsersAction)][0]
+        self.assertFalse(parser.allow_abbrev)
+        for name, sub in [('', parser), *subparsers.choices.items()]:
+            with self.subTest(parser=name):
+                self.assertIsInstance(sub, cf.FixedErrorParser)
+                self.assertFalse(sub.allow_abbrev)
+                error = io.StringIO()
+                with contextlib.redirect_stderr(error), self.assertRaises(cf.ArgumentRejected) as caught:
+                    sub.error('unrecognized arguments: ' + SECRET)
+                self.assertEqual(error.getvalue(), '')
+                self.assertEqual(caught.exception.args, ())
+
+    def test_real_cli_process_never_echoes_argv(self):
+        # Every case returns before the root check, so nothing on this host is read or changed.
+        cases = [(argv, 1, 'runtime_actor_not_connected') for argv in (['sync', '--approve=' + SECRET], ['apply'],
+                                                                         ['import-plan'], ['--config', SECRET, 'import'])]
+        cases += [(['bogus', SECRET], 2, 'unknown_command'), (['inspect-state', '--x=' + SECRET], 2, 'invalid_arguments'),
+                  (['--lock-fd=' + SECRET, 'verify-cohort'], 2, 'invalid_arguments'),
+                  (['verify-cohort', '-h'], 2, 'invalid_arguments'), (['plan', '--help', SECRET], 1, 'runtime_actor_not_connected'),
+                  (['-h', SECRET], 2, 'unknown_command')]
+        for argv, rc, code in cases:
+            with self.subTest(argv=argv):
+                done = subprocess.run([sys.executable, '-I', '-B', str(MODULE_PATH), *argv],
+                                      capture_output=True, text=True, timeout=30)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (rc, '', canonical_error(code)))
+
+
+def canonical_error(code):
+    return json.dumps({'error': code}, separators=(',', ':')) + '\n'
+
+
+S0_VERIFIER_PATH = Path(__file__).resolve().parents[4] / 'molecule/cloudfront_sync/s0_refusal_verify.py'
+
+
+def load_s0_verifier(path=S0_VERIFIER_PATH):
+    """Load the molecule S0 verifier by path (its parse_subcommands is used above).
+
+    Returns the module and every process-level side effect its import
+    attempted. The import must not run main(), exit, install a signal handler
+    or change the signal mask; the calls are recorded (and not performed).
+    """
+    attempted = []
+    def record(name):
+        return lambda *args, **kwargs: attempted.append(name)
+    handler, mask = signal.getsignal(signal.SIGTERM), signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    spec = importlib.util.spec_from_file_location('cloudfront_sync_s0_verifier', path)
+    module = importlib.util.module_from_spec(spec)
+    with (mock.patch.object(signal, 'signal', side_effect=record('signal.signal')),
+          mock.patch.object(signal, 'pthread_sigmask', side_effect=record('signal.pthread_sigmask')),
+          mock.patch.object(signal, 'sigwait', side_effect=record('signal.sigwait')),
+          mock.patch.object(sys, 'exit', side_effect=record('sys.exit'))):
+        spec.loader.exec_module(module)
+    if signal.getsignal(signal.SIGTERM) is not handler:
+        attempted.append('SIGTERM handler changed')
+    if signal.pthread_sigmask(signal.SIG_BLOCK, []) != mask:
+        attempted.append('signal mask changed')
+    return module, attempted
+
+
+@functools.cache
+def s0_verifier():
+    """(module, import effects), loaded on first use rather than at import.
+
+    A broken verifier then fails only the tests that use it, never the import
+    of this whole role test module.
+    """
+    return load_s0_verifier()
+
+
+class S0VerifierLoadTests(unittest.TestCase):
+    def test_loading_the_verifier_has_no_process_side_effects(self):
+        verifier, effects = s0_verifier()
+        self.assertEqual(effects, [])
+        self.assertNotEqual(verifier.__name__, '__main__')
+        self.assertTrue(callable(verifier.parse_subcommands))
+
+    def test_the_verifier_is_not_loaded_when_this_module_is_imported(self):
+        source = Path(__file__).read_text()
+        tree = ast.parse(source)
+        module_level_calls = [node.value.func.id for node in tree.body
+                              if isinstance(node, (ast.Assign, ast.Expr)) and isinstance(node.value, ast.Call)
+                              and isinstance(node.value.func, ast.Name)]
+        self.assertNotIn('load_s0_verifier', module_level_calls)
+        self.assertNotIn('s0_verifier', module_level_calls)
+        # A verifier that cannot even be imported fails its load, not this module.
         with tempfile.TemporaryDirectory() as tmp:
-            engine = self.fixture(tmp)
-            host = engine.host
-            host.doc = document(tuple([f'198.51.{i}.0/24' for i in range(5)] + [V6]))
-            deny = {'args': ['deny', '443/tcp'], 'source': None, 'port': None, 'comment': 'administrator', 'proto': None, 'direction': None, 'destination': None}
-            host.rules = [cf.make_rule(f'198.51.{i}.0/24', 443, 'legacy') for i in range(5)] + [deny, cf.make_rule(V6, 443, 'legacy')]
-            legacy = Path(tmp) / 'legacy.json'
-            legacy.write_text(json.dumps({'ranges': [f'198.51.{i}.0/24' for i in range(5)] + [V6]}))
-            engine.import_state(engine.import_plan(legacy)['approve_token'])
-            engine.apply(engine.plan()['approve_token'])
-            # The interleaved deny must remain AFTER the restored v4 allows.
-            before = host.snapshot(engine.config)
-            host.doc = document(tuple([f'198.51.{i}.0/24' for i in range(4)] + [V6]), '11')
-            original = host.delete_rule
-            def fail_after_delete(rule):
-                original(rule)
-                raise cf.SyncError('delete changed kernel then failed')
-            with mock.patch.object(host, 'delete_rule', side_effect=fail_after_delete):
-                self.assertRaises(cf.SyncError, engine.sync)
-            self.assertEqual(host.snapshot(engine.config), before)
-            # Restore can re-add deleted owned rules; order is meaningful for
-            # general rules but these homogeneous exact allow tuples commute.
+            broken = Path(tmp) / 'broken.py'
+            broken.write_text('raise ImportError("broken verifier")\n')
+            self.assertRaises(ImportError, load_s0_verifier, broken)
 
-    def test_exact_expiry_corrupt_plan_and_legacy_shape(self):
+    def test_the_side_effect_probe_detects_handler_mask_and_exit_at_import(self):
         with tempfile.TemporaryDirectory() as tmp:
-            engine = self.fixture(tmp)
-            p = engine.plan()
-            engine.clock = lambda: p['expires_at']
-            self.assertRaises(cf.SyncError, engine.apply, p['approve_token'])
-            engine.clock = lambda: 1000
-            p = engine.plan()
-            pending = cf.json_read(engine.private / 'pending.json'); pending['candidate_hash'] = 'bad'
-            cf.atomic_json(engine.private / 'pending.json', pending)
-            self.assertRaises(cf.SyncError, engine.apply, p['approve_token'])
-            legacy = Path(tmp) / 'legacy.json'
-            legacy.write_text(json.dumps({'ranges': {'ipv4': [V4], 'ipv6': [V6]}}))
-            engine.host.rules = [cf.make_rule(r, 443, comment='legacy') for r in (V4, V6)]
-            plan = engine.import_plan(legacy)
-            engine.import_state(plan['approve_token'])
-            self.assertIsNone(engine.status()['last_success'])
-            self.assertRaises(cf.SyncError, engine.import_plan, legacy)
-            self.assertRaises(cf.SyncError, engine.import_state, plan['approve_token'])
+            for line in ('import signal\nsignal.signal(signal.SIGTERM, lambda *a: None)\n',
+                         'import signal\nsignal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n',
+                         'import sys\nsys.exit(0)\n'):
+                with self.subTest(source=line):
+                    path = Path(tmp) / 'probe.py'
+                    path.write_text(line)
+                    self.assertNotEqual(load_s0_verifier(path)[1], [])
 
 
-    def test_noncanonical_or_corrupt_persisted_state_fails_closed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = self.fixture(tmp)
-            engine.apply(engine.plan()['approve_token'])
-            good = engine.state()
-            for change in [{'initialized': False}, {'ranges': [V6, V4]}, {'aws_sync_token': 'not-a-token'}]:
-                broken = {**good, **change}
-                cf.atomic_json(engine.private / 'state.json', broken)
-                self.assertRaises(cf.SyncError, engine.preflight)
-                self.assertEqual(len(engine.host.rules), 2)
-            cf.atomic_json(engine.private / 'state.json', good)
-            journal = self.journal(engine); journal['version'] = 99
-            cf.atomic_json(engine.private / 'journal.json', journal)
-            self.assertRaises(cf.SyncError, engine.preflight)
-            self.assertTrue(engine.status()['recovery_failed'])
+class SnapshotConfigHashTests(unittest.TestCase):
+    """inspect-runtime's config_hash is the one the ledger records and checks.
 
-    def test_runtime_only_change_and_bundle_change_are_not_adopted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            engine = self.fixture(tmp)
-            engine.apply(engine.plan()['approve_token'])
-            good = engine.state(); before = good['snapshot']; owned = good['owned_rules']
-            after = cf.copy.deepcopy(before)
-            after['runtime'].append({'number': 99, 'family': 4, 'key': 'new-kernel-only-rule', 'policy': None})
-            self.assertRaises(cf.SyncError, engine._verify_after, before, after, owned, owned, {})
-            journal = self.journal(engine)
-            after = cf.copy.deepcopy(before); after['bundles']['/etc/nginx/bundle'] = 'foreign-change'
-            with mock.patch.object(engine.host, 'snapshot', return_value=after):
-                self.assertRaises(cf.SyncError, engine._rollback, journal)
-            self.assertEqual(engine.host.snapshot(engine.config), before)
+    Main check: for realistic configs that pass validate_config (ASCII only:
+    validate_config first rejects any non-ASCII string, key or value, lone
+    surrogates included, and its address, path and unit checks accept
+    nothing else either; ConfigTests covers that), the hash
+    snapshot_config_hash computes is accepted by the real bundle module's
+    _ledger_basic_p, and a wrong or another config's hash is not.
+    """
 
-    def test_duplicate_bundles_and_malformed_aws_family_rejected(self):
-        cfg = config()
-        bundle = {'geo_file': '/etc/nginx/geo.conf', 'realip_file': '/etc/nginx/server.conf'}
-        cfg['nginx'].update(enabled=True, bundles=[bundle, bundle])
-        self.assertRaises(cf.SyncError, cf.validate_config, cfg)
-        cfg['nginx']['bundles'] = [{'geo_file': '/etc/nginx/geo.conf'}]
-        self.assertRaises(cf.SyncError, cf.validate_config, cfg)
-        for wrong in [42, None, 'not-a-dict']:
-            d = document(); d['prefixes'].append(wrong)
-            self.assertRaises(cf.SyncError, cf.parse_aws, d)
-        d = document(); d['ipv6_prefixes'] = None
-        self.assertRaises(cf.SyncError, cf.parse_aws, d)
+    CODE = textwrap.dedent('''
+        import copy, hashlib, importlib.util, json, sys, types
+        from pathlib import Path
+        files = Path(sys.argv[1])
+        for name in ('ufw_integrity', 'ufw_kernel', 'ufw_kernel_mapping', 'ufw_docker_kernel',
+                     'ufw_docker_transition', 'ufw_observation', 'nginx_observation', 'cloudfront_snapshot'):
+            module = types.ModuleType(name); module.__file__ = str(files / (name + '.py')); sys.modules[name] = module
+            exec(compile((files / (name + '.py')).read_bytes(), module.__file__, 'exec'), module.__dict__)
+        m = sys.modules['cloudfront_snapshot']
+        spec = importlib.util.spec_from_file_location('cli', files / 'cloudfront-sync.py')
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        def p(config, config_hash):
+            backend = config['firewall']['backend']
+            return json.dumps({'integrity_format': m.FORMAT, 'backend': backend, 'config_hash': config_hash,
+                               'enrollment_id': 'b' * 32, 'profile_id': 'none', 'inventory': None,
+                               'owned_rules': [], 'protected_context': None}).encode()
+        def ledger(config, config_hash):
+            # backend none: P is complete, so acceptance is total. backend ufw:
+            # the hash/context check passed when the next check (the protected
+            # context, absent in this P) is the one that fails.
+            try:
+                m._ledger_basic_p(p(config, config_hash), config, 0)
+                return 'accepted'
+            except m.SnapshotError as error:
+                if config['firewall']['backend'] == 'ufw' and str(error) == 'ledger_protected_context':
+                    return 'accepted'
+                return str(error)
+        base = {'host_address': '192.0.2.10', 'firewall': {'backend': 'none', 'ports': [443]},
+                'nginx': {'enabled': False, 'shared_dir': '/etc/nginx/cloudfront', 'bundles': []},
+                'limits': {'max_changes': 10, 'min_ratio': 0.8}, 'notify_unit': ''}
+        def variant(**changes):
+            config = copy.deepcopy(base)
+            for path, value in changes.items():
+                target = config
+                *parents, leaf = path.split('__')
+                for part in parents:
+                    target = target[part]
+                target[leaf] = value
+            return config
+        configs = [base,
+                   variant(firewall__backend='ufw', firewall__ports=[443, 8443, 80]),
+                   variant(host_address='2001:db8::10', limits__min_ratio=1, limits__max_changes=1000),
+                   variant(firewall__backend='ufw', nginx__enabled=True, notify_unit='cloudfront-reload@web-01.service',
+                           nginx__shared_dir='/etc/common-sv/nginx/cloudfront',
+                           nginx__bundles=[{'geo_file': '/etc/nginx/conf.d/cf-geo.conf',
+                                            'realip_file': '/etc/nginx/conf.d/cf-realip.conf'},
+                                           {'geo_file': '/etc/common-sv/nginx/site_b/geo.conf',
+                                            'realip_file': '/etc/common-sv/nginx/site_b/realip.conf'}]),
+                   variant(limits__min_ratio=0.05, firewall__ports=[65535, 1])]
+        rows = []
+        for config in configs:
+            cli.validate_config(config)
+            own = cli.snapshot_config_hash(m, config)
+            others = [cli.snapshot_config_hash(m, other) for other in configs if other is not config]
+            rows.append({'cli': ledger(config, own), 'zero': ledger(config, '0' * 64),
+                         'other_configs': sorted({ledger(config, digest) for digest in others}),
+                         'distinct': own not in others})
+        # Discriminator only. validate_config rejects every non-ASCII string
+        # (its explicit ASCII check, before any field check), so
+        # a valid config never tells the bundle's UTF-8 canonical form from an
+        # ensure_ascii re-implementation; this config bypasses validate_config
+        # to show the CLI uses the bundle's form. Its premise is checked too.
+        wide = variant(notify_unit='\\u00e9.service')
+        try:
+            cli.validate_config(wide)
+            wide_rejected = False
+        except cli.SyncError:
+            wide_rejected = True
+        ascii_digest = lambda c: hashlib.sha256(json.dumps(c, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        print(json.dumps({'valid': rows, 'wide_rejected_by_validate_config': wide_rejected,
+                          'wide_cli': ledger(wide, cli.snapshot_config_hash(m, wide)),
+                          'wide_ascii_reimplementation': ledger(wide, ascii_digest(wide))}))
+    ''')
 
+    def run_code(self):
+        done = subprocess.run([sys.executable, '-I', '-B', '-c', self.CODE, str(MODULE_PATH.parent)],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
 
-class PolicySafetyTests(unittest.TestCase):
-    def opaque(self, action, port, source='any'):
-        return {'args': [action, port], 'source': None, 'port': None, 'comment': 'administrator', 'proto': None,
-                'direction': None, 'destination': None, 'test_policy': {'action': action, 'source': source, 'port': port}}
+    def test_cli_config_hash_is_accepted_by_the_ledger_for_valid_configs(self):
+        result = self.run_code()
+        self.assertEqual(len(result['valid']), 5)
+        for index, row in enumerate(result['valid']):
+            with self.subTest(config=index):
+                self.assertEqual(row, {'cli': 'accepted', 'zero': 'ledger_p_context',
+                                       'other_configs': ['ledger_p_context'], 'distinct': True})
 
-    def test_initial_shadowed_allow_fails_before_any_changes(self):
-        for action, expression in [('deny', '443/tcp'), ('reject', '440:450/tcp'), ('limit', '443'), ('deny', 'Nginx Full')]:
-            with self.subTest(action=action, expression=expression), tempfile.TemporaryDirectory() as tmp:
-                host = FakeHost(); host.rules = [self.opaque(action, expression)]
-                engine = cf.Engine(config(), tmp, host)
-                before = host.snapshot(engine.config)
-                self.assertRaises(cf.SyncError, engine.plan)
-                self.assertEqual(host.snapshot(engine.config), before)
-                self.assertEqual(host.actions, [])
-                self.assertIsNone(engine.state())
-
-    def test_nonmatching_port_udp_and_source_policy_preserved(self):
-        for action, expression, source in [('deny', '18444/tcp', 'any'), ('limit', '22/tcp', 'any'),
-                                           ('deny', '443/udp', 'any'), ('deny', '443/tcp', '203.0.113.0/24')]:
-            with self.subTest(action=action, expression=expression, source=source), tempfile.TemporaryDirectory() as tmp:
-                host = FakeHost(); admin = self.opaque(action, expression, source); host.rules = [admin]
-                engine = cf.Engine(config(), tmp, host)
-                engine.apply(engine.plan()['approve_token'])
-                self.assertIn(admin, host.rules)
-                self.assertEqual(len(host.rules), 3)
-
-    def test_future_source_shadow_and_unowned_collision_block_before_nginx(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            host = FakeHost()
-            cfg = config(); cfg['nginx'].update(enabled=True, bundles=[{'geo_file': '/etc/nginx/a', 'realip_file': '/etc/nginx/b'}])
-            host.nginx = cf.render_nginx([V4, V6])
-            host.rules = [cf.make_rule(r, 443, 'legacy') for r in (V4, V6)]
-            future = '198.51.100.0/24'
-            deny = self.opaque('deny', '443/tcp', future)
-            host.rules.append(deny)
-            engine = cf.Engine(cfg, tmp, host)
-            legacy = Path(tmp) / 'legacy.json'; legacy.write_text(json.dumps({'ranges': [V4, V6]}))
-            # Initial preview must leave the role installed for explicit import.
-            self.assertTrue(engine.plan()['import_required'])
-            engine.import_state(engine.import_plan(legacy)['approve_token'])
-            engine.apply(engine.plan()['approve_token'])
-            before = host.snapshot(engine.config)
-            host.doc = document((V4, V6, future), '11')
-            self.assertRaises(cf.SyncError, engine.sync)
-            self.assertEqual(host.snapshot(engine.config), before)
-            self.assertEqual(host.actions, [])
-            self.assertEqual(engine.state()['aws_sync_token'], '10')
-
-        with tempfile.TemporaryDirectory() as tmp:
-            class UfwCommentHost(FakeHost):
-                def add_rule(self, rule):
-                    for current in self.rules:
-                        if cf.rule_identity(current) == cf.rule_identity(rule):
-                            self.rules[self.rules.index(current)] = dict(rule)
-                            self.actions.append(('overwrite-comment', rule))
-                            return
-                    super().add_rule(rule)
-            host = UfwCommentHost()
-            admin = cf.make_rule(future, 443, 'administrator-owned')
-            host.rules = [cf.make_rule(r, 443, 'legacy') for r in (V4, V6)] + [admin]
-            engine = cf.Engine(config(), tmp, host)
-            legacy = Path(tmp) / 'legacy.json'; legacy.write_text(json.dumps({'ranges': [V4, V6]}))
-            engine.import_state(engine.import_plan(legacy)['approve_token'])
-            engine.apply(engine.plan()['approve_token'])
-            before = host.snapshot(engine.config)
-            host.doc = document((V4, V6, future), '11')
-            self.assertRaises(cf.SyncError, engine.sync)
-            self.assertEqual(host.snapshot(engine.config), before)
-            self.assertIn(admin, host.rules)
-            self.assertEqual(host.actions, [])
-
-    def test_rollback_never_deletes_collided_admin_permission(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            host = FakeHost(); engine = cf.Engine(config(), tmp, host)
-            admin = cf.make_rule(V4, 443, 'administrator')
-            target = cf.make_rule(V4, 443)
-            host.rules = [admin]
-            before = host.snapshot(engine.config)
-            journal = {'version': 1, 'config_hash': cf.digest(engine.config), 'before': before, 'old_state': None,
-                       'target_rules': [target], 'target_nginx': {}, 'new_state': None, 'addition_attempts': [target], 'deletion_attempts': []}
-            host.rules = [target]  # Simulate ufw's documented comment replacement.
-            self.assertRaises(cf.SyncError, engine._rollback, journal)
-            self.assertEqual(host.rules, [target])
-            self.assertEqual(host.actions, [])
+    def test_non_ascii_discriminator_and_its_premise(self):
+        result = self.run_code()
+        self.assertTrue(result['wide_rejected_by_validate_config'])
+        self.assertEqual((result['wide_cli'], result['wide_ascii_reimplementation']), ('accepted', 'ledger_p_context'))
 
 
-    def test_external_revocation_during_fetch_is_not_reinstated(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            host = FakeHost(); engine = cf.Engine(config(), tmp, host)
-            engine.apply(engine.plan()['approve_token'])
-            revoked = host.rules[0]
-            before_action_count = len(host.actions)
-            original_fetch = host.fetch
-            def revoke_during_fetch():
-                host.rules.remove(revoked)
-                return original_fetch()
-            with mock.patch.object(host, 'fetch', side_effect=revoke_during_fetch):
-                self.assertRaises(cf.SyncError, engine.sync)
-            self.assertNotIn(revoked, host.rules)
-            self.assertEqual(len(host.actions), before_action_count)
-            self.assertFalse((engine.private / 'journal.json').exists())
+# Every import of the CLI, exactly. Aliased host modules (import os as o,
+# from os import open) would hide calls from the name-based scans above.
+EXPECTED_IMPORTS = frozenset({
+    ('import', 'hashlib', '_bg_hashlib'), ('import', 'json', '_bg_json'), ('import', 'math', '_bg_math'),
+    ('import', 'os', '_bg_os'), ('from', 'pathlib.Path', '_BgPath'), ('import', 're', '_bg_re'),
+    ('import', 'stat', '_bg_stat'), ('import', 'sys', '_bg_sys'), ('from', 'types.ModuleType', '_BgModule'),
+    ('import', 'argparse', None), ('import', 'contextlib', None), ('import', 'fcntl', None),
+    ('import', 'ipaddress', None), ('import', 'json', None), ('import', 'math', None),
+    ('import', 'os', None), ('from', 'pathlib.Path', None), ('import', 're', None), ('import', 'stat', None),
+    ('import', 'sys', None)})
+_HOST_MODULE_NAMES = ('os', '_bg_os', 'fcntl')
+# exec/compile run only the hash-verified bootstrap bytes in _bundle_verified.
+_DYNAMIC_NAMES = ('__import__', 'importlib', 'eval', 'globals', 'locals', 'vars', 'setattr', 'delattr', '__builtins__')
 
-    def test_rollback_refuses_to_restore_unchanged_externally_revoked_allow(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            host = FakeHost(); engine = cf.Engine(config(), tmp, host)
-            engine.apply(engine.plan()['approve_token'])
-            state = engine.state(); revoked = host.rules[0]
-            journal = {'version': 1, 'config_hash': cf.digest(engine.config), 'before': state['snapshot'], 'old_state': state,
-                       'target_rules': state['owned_rules'], 'target_nginx': {}, 'new_state': None,
-                       'addition_attempts': [], 'deletion_attempts': []}
-            host.rules.remove(revoked)
-            before_action_count = len(host.actions)
-            self.assertRaises(cf.SyncError, engine._rollback, journal)
-            self.assertNotIn(revoked, host.rules)
-            self.assertEqual(len(host.actions), before_action_count)
 
-    def test_status_policy_formats_are_conservative(self):
-        for text, expected in [('18444/tcp DENY IN Anywhere', False), ('443/udp DENY IN Anywhere', False),
-                               ('440:450/tcp REJECT IN Anywhere', True), ('Nginx Full DENY IN Anywhere', True),
-                               ('Anywhere DENY OUT 192.0.2.1', False), ('Anywhere DENY FWD 192.0.2.1', False),
-                               ('Anywhere SOMETHING 192.0.2.1', True)]:
-            policy = cf.policy_from_status(text.split())
-            self.assertEqual(cf.policy_may_match(policy, V4, 443), expected)
-        self.assertTrue(cf.port_may_match('80,443/tcp', 443))
-        self.assertFalse(cf.port_may_match('80,8443/tcp', 443))
+def alias_or_dynamic_access(tree):
+    """Spellings that would let a host API escape the name-based scans: (line, reason)."""
+    rows = []
+    imports = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(('import', alias.name, alias.asname) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.update(('from', '%s.%s' % (node.module, alias.name), alias.asname) for alias in node.names)
+    rows.extend((0, 'import ' + repr(row)) for row in sorted(imports - EXPECTED_IMPORTS, key=repr))
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    optional_flags = {id(node.args[0]) for node in ast.walk(tree) if _is_optional_flag(node, _OS_MODULES)}
+    owners = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    allowed_exec = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == '_bundle_verified':
+            allowed_exec.update(id(item) for item in ast.walk(node))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in _HOST_MODULE_NAMES:
+            # A host function may only be called in place (no f = os.open, no
+            # callback); constants such as os.O_RDONLY and fcntl.LOCK_EX are data.
+            if id(node) not in called and not node.attr.isupper():
+                rows.append((node.lineno, 'uncalled ' + node.value.id + '.' + node.attr))
+        elif isinstance(node, ast.Name) and node.id in _HOST_MODULE_NAMES:
+            if id(node) not in owners and id(node) not in optional_flags:
+                rows.append((node.lineno, 'bare module ' + node.id))
+        elif isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES:
+            rows.append((node.lineno, 'dynamic ' + node.id))
+        elif isinstance(node, ast.Name) and node.id in ('exec', 'compile') and id(node) not in allowed_exec:
+            rows.append((node.lineno, 'dynamic ' + node.id))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'getattr'
+              and not _is_optional_flag(node, _OS_MODULES)):
+            rows.append((node.lineno, 'getattr'))
+    return rows
+
+
+class AliasAndDynamicAccessTests(unittest.TestCase):
+    def test_cli_has_no_aliased_or_dynamic_host_api_access(self):
+        self.assertEqual(alias_or_dynamic_access(ast.parse(MODULE_PATH.read_text())), [])
+
+    def test_alias_checker_rejects_every_known_spelling(self):
+        base = MODULE_PATH.read_text()
+        for source in ('import os as o\n', 'from os import open as x\n', 'from os import open\n',
+                       'import subprocess as s\n', 'f = os.open\n', 'g = _bg_os.kill\n', 'h = getattr(os, "open")\n',
+                       'm = os\n', 'call(os)\n', '__import__("os").open("/x", 1)\n', 'eval("os")\n',
+                       'exec("pass")\n', 'getattr(os, "O_TRUNC")\n', 'getattr(os, "O_TRUNC", 1)\n',
+                       'import importlib\n', 'vars(os)["open"]\n', 'opener = fcntl.flock\n'):
+            with self.subTest(source=source):
+                self.assertNotEqual(alias_or_dynamic_access(ast.parse(base + '\n' + source)), [])
+
+
+class ModuleDefinitionTests(unittest.TestCase):
+    def test_definitions_in_nested_module_blocks_and_annotations_are_found(self):
+        tree = ast.parse(textwrap.dedent("""
+            async def a(): pass
+            b: int = 1
+            c = d = 2
+            e, (f, *g) = 1, (2, 3)
+            h += 1
+            if X:
+                def i(): pass
+            else:
+                class j: pass
+            try:
+                k = 1
+            except Exception:
+                def l(): pass
+            finally:
+                m: str
+            with open('x') as n:
+                def o(): pass
+            for p in ():
+                q = 1
+            while False:
+                r = 1
+            def outer():
+                inner = 1
+            class Holder:
+                member = 1
+        """))
+        self.assertEqual([name for name, _ in module_definitions(tree)],
+                         ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
+                          'outer', 'Holder'])
+
+    def test_reachability_follows_nested_and_async_definitions(self):
+        tree = ast.parse(textwrap.dedent("""
+            if X:
+                async def helper(): os.kill(1, 9)
+            else:
+                helper = None
+            def main(): helper()
+        """))
+        reached = reachable_from_main(tree)
+        self.assertEqual(set(reached), {'main', 'helper'})
+        self.assertNotEqual(host_effect_references(reached), [])
+
+
+BUNDLE_MODULES = ('bundle_manifest.py', 'bundled_source.py', 'ufw_integrity.py', 'ufw_kernel.py',
+                  'ufw_kernel_mapping.py', 'ufw_docker_kernel.py', 'ufw_docker_transition.py',
+                  'ufw_observation.py', 'nginx_observation.py', 'cloudfront_snapshot.py')
+
+
+# Module names whose ``open`` takes os-style flags, and those whose ``open``
+# takes a builtin-style mode (``builtins`` is ``open`` itself).
+_OS_LIKE_MODULES = frozenset({'os', 'posix', 'nt'})
+_IO_LIKE_MODULES = frozenset({'io', '_io', 'builtins'})
+# Filesystem/descriptor writers of os/posix/nt. Process APIs are out of scope
+# here (ufw_observation runs its fixed read-only commands; see its own tests).
+_OS_WRITERS = frozenset({'write', 'writev', 'pwrite', 'pwritev', 'truncate', 'ftruncate', 'unlink', 'remove',
+                         'rmdir', 'removedirs', 'rename', 'renames', 'replace', 'mkdir', 'makedirs', 'symlink',
+                         'link', 'chmod', 'fchmod', 'lchmod', 'chown', 'fchown', 'lchown', 'utime', 'mkfifo',
+                         'mknod', 'posix_fallocate', 'setxattr', 'removexattr', 'copy_file_range', 'sendfile',
+                         'splice', 'fdopen'})
+# pathlib writers. str.replace(old, new[, count]) has two or more positional
+# arguments while Path.replace(target) has one, as in host_effect_references.
+_PATH_WRITERS = frozenset({'write_bytes', 'write_text', 'touch', 'mkdir', 'unlink', 'rmdir', 'rename', 'replace',
+                           'symlink_to', 'hardlink_to', 'link_to', 'chmod', 'lchmod', 'copy', 'copy_into',
+                           'move', 'move_into'})
+
+
+def _open_mode(call, position):
+    """The literal mode of an open-like call: 'r' when omitted, None when not literal."""
+    node = call.args[position] if len(call.args) > position else next(
+        (k.value for k in call.keywords if k.arg == 'mode'), None)
+    if node is None:
+        return 'r'
+    return node.value if isinstance(node, ast.Constant) and type(node.value) is str else None
+
+
+def _writable_mode(mode):
+    return mode is None or any(flag in mode for flag in 'wax+')
+
+
+def module_open_problems(tree):
+    """Writes or unanalyzable opens in a bundle module, any import spelling: (rows, os aliases).
+
+    Rows name builtin open / io.open / _io.open / builtins.open / Path.open
+    in a writable or non-literal mode, os/posix/nt.open with non-read-only or
+    non-literal flags, every os/posix/nt filesystem writer (fdopen included),
+    pathlib writers, ``from <os/io module> import``, and open-like functions
+    taken without a call (``f = os.open``) or through getattr.
+    """
+    os_aliases, io_aliases, rows = set(), set(), []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _OS_LIKE_MODULES:
+                    os_aliases.add(alias.asname or alias.name)
+                elif alias.name in _IO_LIKE_MODULES:
+                    io_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module in _OS_LIKE_MODULES | _IO_LIKE_MODULES:
+            rows.append((node.lineno, 'from ' + node.module + ' import'))
+    module_aliases = os_aliases | io_aliases
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in module_aliases:
+            if node.attr in ('open', 'fdopen') and id(node) not in called:
+                rows.append((node.lineno, 'uncalled ' + node.value.id + '.' + node.attr))
+            elif node.value.id in os_aliases and node.attr in _OS_WRITERS:
+                rows.append((node.lineno, node.value.id + '.' + node.attr))
+        elif isinstance(node, ast.Name) and node.id in ('open', '__builtins__') and id(node) not in called:
+            rows.append((node.lineno, 'uncalled ' + node.id))
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Name) and func.id == 'getattr' and node.args and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in module_aliases | {'__builtins__'} and not _is_optional_flag(node, os_aliases)):
+            rows.append((node.lineno, 'getattr(' + node.args[0].id + ', ...)'))
+        elif isinstance(func, ast.Name) and func.id == 'open':
+            if _writable_mode(_open_mode(node, 1)):
+                rows.append((node.lineno, 'open mode'))
+        elif isinstance(func, ast.Attribute) and func.attr == 'open':
+            owner = func.value.id if isinstance(func.value, ast.Name) else None
+            if owner in io_aliases:
+                if _writable_mode(_open_mode(node, 1)):
+                    rows.append((node.lineno, owner + '.open mode'))
+            elif owner not in os_aliases and _writable_mode(_open_mode(node, 0)):
+                # Any other receiver is treated as Path.open(mode='r', ...).
+                rows.append((node.lineno, 'Path.open mode'))
+        elif isinstance(func, ast.Attribute) and func.attr in _PATH_WRITERS and not (
+                isinstance(func.value, ast.Name) and func.value.id in os_aliases):
+            if func.attr == 'replace' and len(node.args) >= 2:
+                continue
+            rows.append((node.lineno, 'Path.' + func.attr))
+    for _, flags in os_open_calls({'module': tree}, frozenset(os_aliases)):
+        if flags is None or not flags <= _READ_ONLY_OPEN_FLAGS:
+            rows.append((0, 'os.open flags ' + repr(None if flags is None else sorted(flags))))
+    return rows, os_aliases
+
+
+class BundleModuleOpenTests(unittest.TestCase):
+    """Read-only check of the helper modules main() loads (the modules are not edited here)."""
+
+    def test_bundle_module_list_matches_the_entry_stub(self):
+        self.assertEqual(set(BUNDLE_MODULES), {*(name + '.py' for name in cf._BG_HELPERS), *cf._BG_BOOTS})
+
+    def test_bundle_modules_open_read_only(self):
+        opened = 0
+        for name in BUNDLE_MODULES:
+            with self.subTest(module=name):
+                tree = ast.parse((MODULE_PATH.parent / name).read_text())
+                rows, aliases = module_open_problems(tree)
+                self.assertEqual(rows, [])
+                self.assertLessEqual(aliases, {'os'})
+                opened += len(os_open_calls({'module': tree}, frozenset(aliases)))
+        self.assertGreater(opened, 0)
+
+    def test_module_open_checker_rejects_writable_and_aliased_opens(self):
+        bad = (
+            # os / posix / nt open flags, aliases and spellings.
+            'import os\nos.open(p, os.O_RDWR)\n', 'import os as o\no.open(p, o.O_WRONLY|o.O_CREAT)\n',
+            'def f():\n    import os as q\n    q.open(p, flags)\n', 'from os import open\n',
+            'import os\nf = os.open\n', 'import os\ngetattr(os, "open")(p, 0)\n',
+            'import os\nos.open(p, os.O_RDONLY|getattr(os, "O_TRUNC", 1))\n',
+            'import posix\nposix.open(p, posix.O_WRONLY)\n', 'import posix as px\npx.open(p, flags)\n',
+            'import nt\nnt.open(p, nt.O_RDWR)\n', 'from posix import open\n', 'import posix\nf = posix.open\n',
+            # Descriptor wrappers and os-level writers.
+            'import os\nos.fdopen(fd, "w")\n', 'import os\nos.fdopen(fd)\n', 'import os\nos.write(fd, b"x")\n',
+            'import posix\nposix.write(fd, b"x")\n', 'import os\nos.replace(a, b)\n', 'import os\nos.unlink(p)\n',
+            'import os\nos.ftruncate(fd, 0)\n', 'import os\nos.mkdir(p)\n', 'import os\nos.chmod(p, 0o777)\n',
+            # builtin open.
+            'open(p, "w")\n', 'open(p, "a")\n', 'open(p, "x")\n', 'open(p, "r+")\n', 'open(p, "wb")\n',
+            'open(p, mode="w")\n', 'open(p, mode)\n', 'opener = open\n', '__builtins__.open(p, "w")\n',
+            # io / _io / builtins modules.
+            'import io\nio.open(p, "w")\n', 'import io as i\ni.open(p, mode="ab")\n', 'import _io\n_io.open(p, "w")\n',
+            'import io\nio.open(p, m)\n', 'from io import open\n', 'from _io import open\n', 'import io\nf = io.open\n',
+            'import builtins\nbuiltins.open(p, "w")\n', 'import io\ngetattr(io, "open")(p, "w")\n',
+            # pathlib.
+            'Path(p).open("w")\n', 'path.open(mode="a")\n', 'path.open("r+")\n', 'path.open(m)\n',
+            'Path(p).write_bytes(b"x")\n', 'path.write_text("x")\n', 'path.touch()\n', 'path.mkdir()\n',
+            'path.unlink()\n', 'path.rmdir()\n', 'path.rename(t)\n', 'path.replace(t)\n', 'path.symlink_to(t)\n',
+            'path.hardlink_to(t)\n', 'path.chmod(0o600)\n', 'path.copy(t)\n', 'path.move(t)\n')
+        for source in bad:
+            with self.subTest(source=source):
+                self.assertNotEqual(module_open_problems(ast.parse(source))[0], [])
+        good = ('import os\nos.open(p, os.O_RDONLY|os.O_NOFOLLOW|getattr(os, "O_NOATIME", 0), dir_fd=d)\n',
+                'open(p)\n', 'open(p, "rb")\n', 'open(p, mode="r")\n', 'import io\nio.open(p, "rb")\n',
+                'import _io\n_io.open(p)\n', 'Path(p).open()\n', 'path.open("rb")\n', 'Path(p).read_bytes()\n',
+                'path.read_text()\n', 'text.replace("a", "b")\n', 'text.replace("a", "b", 1)\n',
+                'import os\nos.read(fd, 1)\nos.fstat(fd)\nos.close(fd)\n', 'import os\nos.path.join(a, b)\n')
+        for source in good:
+            with self.subTest(source=source):
+                self.assertEqual(module_open_problems(ast.parse(source))[0], [])
 
 
 if __name__ == '__main__':

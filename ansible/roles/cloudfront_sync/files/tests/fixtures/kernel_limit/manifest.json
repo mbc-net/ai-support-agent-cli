@@ -1,0 +1,11 @@
+{
+  "provenance": "independent new network-none containers; documentary addresses; raw UFW renderer to actual iptables; no new mapping import",
+  "collector_sha256": "1feccc086db713094c09a2ea1c7f7b07af618d01412c3d71d9efc36ba5192051",
+  "files": {
+    "22.04.json": "dc1b1421b0a1938fa0137f893144d933dcdffa8ba294dc3b0161c2db458196e1",
+    "24.04.json": "d116f5c45f02c9e489caf028556a14d26fe0b46b8caac87d9de54e24778a66a8",
+    "26.04.json": "fd121f51f46d7f1674a6df4025384223a9cab21add43731b95f85d581a4e9cb3"
+  },
+  "reusable_collector_sha256": "0f239c1b79695a32e8d3342b8f302d94b652ca3a3f45b321f6f008435a9c0f74",
+  "reusable_collector_note": "Same executed collector with only BASE replaced by repository-relative resolution; original executed SHA retained separately."
+}

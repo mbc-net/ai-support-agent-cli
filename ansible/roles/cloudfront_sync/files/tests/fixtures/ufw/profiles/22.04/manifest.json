@@ -1,0 +1,309 @@
+{
+  "schema": 1,
+  "fixture_only": true,
+  "kind": "profile-matrix",
+  "os": "22.04",
+  "ufw_version": "0.36.1-4ubuntu0.1",
+  "rule_commands": [
+    [
+      "allow",
+      "from",
+      "203.0.113.70",
+      "comment",
+      "fixture-any-noport"
+    ],
+    [
+      "allow",
+      "from",
+      "203.0.113.71",
+      "to",
+      "any",
+      "port",
+      "9080",
+      "comment",
+      "fixture-any-port"
+    ],
+    [
+      "reject",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.72",
+      "to",
+      "any",
+      "port",
+      "9081",
+      "comment",
+      "fixture-reject-tcp"
+    ],
+    [
+      "allow",
+      "log-all",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.73",
+      "to",
+      "any",
+      "port",
+      "9082",
+      "comment",
+      "fixture-logall"
+    ],
+    [
+      "limit",
+      "log",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.74",
+      "to",
+      "any",
+      "port",
+      "9083",
+      "comment",
+      "fixture-limit-log"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.75",
+      "port",
+      "1100,1101",
+      "to",
+      "any",
+      "port",
+      "9084,9085",
+      "comment",
+      "fixture-both-multi"
+    ],
+    [
+      "allow",
+      "proto",
+      "tcp",
+      "from",
+      "203.0.113.76/32",
+      "port",
+      "1102",
+      "to",
+      "any",
+      "port",
+      "9086",
+      "comment",
+      "fixture-host32"
+    ],
+    [
+      "allow",
+      "proto",
+      "udp",
+      "from",
+      "2001:db8:12::1/128",
+      "to",
+      "any",
+      "port",
+      "9087",
+      "comment",
+      "fixture-host128"
+    ],
+    [
+      "allow",
+      "CloudFront Multi App"
+    ],
+    [
+      "limit",
+      "22/tcp",
+      "comment",
+      "fixture-ssh-limit"
+    ]
+  ],
+  "cases": [
+    {
+      "name": "off",
+      "profile": {
+        "loglevel": "off",
+        "default_input": "deny",
+        "default_output": "allow",
+        "default_forward": "deny",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "off.user.rules",
+          "sha256": "68878bdfa854db18bb6f09b48b20042c8b486d7435cd39554f633e1ea7b85221"
+        },
+        "user6.rules": {
+          "file": "off.user6.rules",
+          "sha256": "4841854c93a639fcddb0fceef727d653689a274cb849466e035f9edb3155aaa8"
+        }
+      }
+    },
+    {
+      "name": "low",
+      "profile": {
+        "loglevel": "low",
+        "default_input": "deny",
+        "default_output": "allow",
+        "default_forward": "deny",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "low.user.rules",
+          "sha256": "ae1046515151913dedf1e669e3fb996e03ecb69a107cfc8348592c287f43216b"
+        },
+        "user6.rules": {
+          "file": "low.user6.rules",
+          "sha256": "7c960b3567f7bee21d1ed03d5396bc3c002bbeda19c6e6e1cee6f0339f3a2a07"
+        }
+      }
+    },
+    {
+      "name": "medium",
+      "profile": {
+        "loglevel": "medium",
+        "default_input": "deny",
+        "default_output": "allow",
+        "default_forward": "deny",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "medium.user.rules",
+          "sha256": "1e7b4bdcde0bc5f71269ed5186980f074acb1c9ef1b250dd6b01a88f6570836c"
+        },
+        "user6.rules": {
+          "file": "medium.user6.rules",
+          "sha256": "8bfd22fb2771b2eac4cbfb633e9217ac110260b4d5650fe04754f30cc5905f0f"
+        }
+      }
+    },
+    {
+      "name": "high",
+      "profile": {
+        "loglevel": "high",
+        "default_input": "deny",
+        "default_output": "allow",
+        "default_forward": "deny",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "high.user.rules",
+          "sha256": "95e3837fc73aa90d849df1787096e25fe6a65480b49f95a5d475b4453a9fc2a0"
+        },
+        "user6.rules": {
+          "file": "high.user6.rules",
+          "sha256": "03b89ce623895c1b2f38cc3380fd3cd01677c694f8c5d52d769426d2b47ebc63"
+        }
+      }
+    },
+    {
+      "name": "full",
+      "profile": {
+        "loglevel": "full",
+        "default_input": "deny",
+        "default_output": "allow",
+        "default_forward": "deny",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "full.user.rules",
+          "sha256": "a0039aefd5617cb3454df4f1c8a2f7e0dc5efb0bc18071e59a34f32389eb5f0c"
+        },
+        "user6.rules": {
+          "file": "full.user6.rules",
+          "sha256": "9c8f0c469af90b5d7567d6bb397093a7f4e685ebcbd39746aea4b9a30a1cd336"
+        }
+      }
+    },
+    {
+      "name": "mixed-defaults",
+      "profile": {
+        "loglevel": "low",
+        "default_input": "allow",
+        "default_output": "deny",
+        "default_forward": "reject",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "mixed-defaults.user.rules",
+          "sha256": "ad3b65309effa733ab45ce22b0906d17fc8f0abebe05d60b68a1b06e3d0ac6af"
+        },
+        "user6.rules": {
+          "file": "mixed-defaults.user6.rules",
+          "sha256": "fd501529aac9229d8bcdb650cfa5f0fa0b4de56746fd15243d89212a609f1c04"
+        }
+      }
+    },
+    {
+      "name": "allow-defaults",
+      "profile": {
+        "loglevel": "medium",
+        "default_input": "allow",
+        "default_output": "allow",
+        "default_forward": "allow",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "allow-defaults.user.rules",
+          "sha256": "1c914d6717af7fa65395d252542c4b27353d68948b3bc5075f076cf5fbede8f1"
+        },
+        "user6.rules": {
+          "file": "allow-defaults.user6.rules",
+          "sha256": "133b96c52e0039941cf3a56031e475b2045e0b047d7d9f3195bf1ab86afa043f"
+        }
+      }
+    },
+    {
+      "name": "reject-defaults",
+      "profile": {
+        "loglevel": "high",
+        "default_input": "reject",
+        "default_output": "reject",
+        "default_forward": "reject",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "reject-defaults.user.rules",
+          "sha256": "219657eb7231a640469dcb5529cd5ed8738fb3bdd2ba26a8fe6c44f29e87eeeb"
+        },
+        "user6.rules": {
+          "file": "reject-defaults.user6.rules",
+          "sha256": "bbca46792f433e5b59f1eed57de6c10dd4b4c0291fc2cc08a598d40cf403c4aa"
+        }
+      }
+    },
+    {
+      "name": "off-allow-defaults",
+      "profile": {
+        "loglevel": "off",
+        "default_input": "allow",
+        "default_output": "allow",
+        "default_forward": "allow",
+        "limit_supported": true
+      },
+      "files": {
+        "user.rules": {
+          "file": "off-allow-defaults.user.rules",
+          "sha256": "68878bdfa854db18bb6f09b48b20042c8b486d7435cd39554f633e1ea7b85221"
+        },
+        "user6.rules": {
+          "file": "off-allow-defaults.user6.rules",
+          "sha256": "4841854c93a639fcddb0fceef727d653689a274cb849466e035f9edb3155aaa8"
+        }
+      }
+    }
+  ],
+  "source_hashes": {
+    "write_rules": "76fbcef34ad3a0d5e484b03e1e4e80889a2dff1edff3515949fa138d5b9c5f57",
+    "format_rule": "4f01ae5d78d57f4656c903b8aaff31213b93d2d2ff4db8120c226244a2ab1a3b"
+  },
+  "adapter_sha256": "81e455a22b53e849840b163caebf9a147ff2e7828aeb47a61d0aa489bd85171c",
+  "roundtrips": 18
+}

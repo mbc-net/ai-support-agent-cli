@@ -6,11 +6,11 @@ firewall, synchronization state, and existing nginx files must be unchanged.
 The fixture origin header is deliberately public and unrelated to production.
 """
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
 from pathlib import Path
-import stat
 import subprocess
 import sys
 
@@ -22,6 +22,25 @@ TEMP_CONFIG = Path('/etc/nginx/conf.d/cf-sync-vm-network.conf')
 SHARED = '/etc/nginx/cloudfront-live'
 TOKEN = 'public-disposable-cf-sync-network-fixture'
 ENV = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'}
+
+
+def load_path(path, module_name):
+    """Execute the Python file at ``path`` as a new module (never via sys.path).
+
+    The single by-path loader of the disposable verifiers. s0_refusal_verify,
+    vm_network_verify and ufw_reference_verify carry this function verbatim
+    (tests/test_disposable_marker.py enforces it): it cannot live in
+    disposable_marker.py, which is the first module it loads. Loading by path
+    works unchanged under ``python -I``, which drops the script directory from
+    sys.path.
+    """
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+marker = load_path(Path(__file__).resolve().with_name('disposable_marker.py'), 'cloudfront_sync_disposable_marker')
 
 PROBE = r'''
 import http.client,json,socket,sys
@@ -61,13 +80,8 @@ def run(args, *, data=None, check=True):
 
 
 def check_sentinel(path):
-    try:
-        info = path.lstat()
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
-                or info.st_mode & 0o077 or path.read_text() != SENTINEL_CONTENT):
-            raise NetworkCheckError('exact root-only disposable-host marker required')
-    except OSError as exc:
-        raise NetworkCheckError('exact root-only disposable-host marker required') from exc
+    if marker.marker_state(path, SENTINEL_CONTENT.encode()) != marker.VALID:
+        raise NetworkCheckError('exact root-only disposable-host marker required')
 
 
 def apple_vz_dmi():

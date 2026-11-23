@@ -1,0 +1,12 @@
+{
+  "install_targets": [
+    "/usr/local/libexec/cloudfront-sync",
+    "/etc/cloudfront-sync",
+    "/var/lib/cloudfront-sync",
+    "/usr/share/cloudfront-sync",
+    "/etc/systemd/system/cloudfront-sync.service",
+    "/etc/systemd/system/cloudfront-sync.timer",
+    "/etc/systemd/system/cloudfront-integrity-guard.service",
+    "/etc/systemd/system/cloudfront-integrity-guard.timer"
+  ]
+}

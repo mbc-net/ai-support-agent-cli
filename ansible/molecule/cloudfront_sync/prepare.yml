@@ -3,9 +3,11 @@
   hosts: all
   become: true
   tasks:
+    # iptables also provides iptables-legacy-save/ip6tables-legacy-save,
+    # whose rulesets the S0 verifier compares.
     - name: Install real system services and firewall tools
       ansible.builtin.apt:
-        name: [python3, ufw, nginx, iproute2, openssh-server, ca-certificates]
+        name: [python3, ufw, nginx, iproute2, openssh-server, ca-certificates, nftables, iptables]
         state: present
         update_cache: true
 
@@ -35,6 +37,10 @@
         argv: [ufw, --force, enable]
       changed_when: false
 
+    # nginx must be active for the verifier's S1 nginx phase, which stages,
+    # reloads, stops and restarts it and restores the original configuration;
+    # the container's systemd also provides the systemd-run sandbox that
+    # inspect-runtime uses for nginx -T.
     - name: Start nginx and sshd
       ansible.builtin.systemd:
         name: "{{ item }}"
