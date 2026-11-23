@@ -366,11 +366,17 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       return errorResult(error)
     }
     const {
+      buildLogDirPreflight,
       buildLogTailPreflight,
       buildReadonlyDiagnostic,
+      filterLogListOutput,
       firstLines,
+      isAllowedLogFile,
+      LastLines,
       READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES,
       READONLY_LOG_ROOTS_MAX,
+      READONLY_LOG_STREAM_MAX_BYTES,
+      READONLY_REMOTE_TIMEOUT_EXIT_CODE,
       readonlyDiagnosticCommandText,
       TOP_PROCESSES_OUTPUT_LINES,
       truncateUtf8,
@@ -397,7 +403,7 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       return reject(payload.catalogId, 'invalid_catalog_request', 'readonly_diagnostic rejected: invalid catalog request')
     }
     const command = readonlyDiagnosticCommandText(built.argv)
-    if (command !== payload.expectedCommand) {
+    if (command === null || command !== payload.expectedCommand) {
       return reject(built.id, 'command_mismatch', 'readonly_diagnostic rejected: command mismatch')
     }
     const blocked = validateCommand(command)
@@ -419,19 +425,33 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       ? Math.min(rawMaxBytes, READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES)
       : READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES
 
-    // log_tail: prepare the symlink / regular-file checks up front so a bad
-    // path is rejected before the single-use credential is consumed.
+    // log_tail / log_grep (a concrete file) and log_list (its directory):
+    // prepare the symlink / regular-file checks up front so a bad path is
+    // rejected before the single-use credential is consumed.
+    // Known limitation (TOCTOU): the preflight and the read are separate SSH
+    // execs, so someone with write access to the log directory could swap the
+    // file for a symlink in between. Accepted: that already requires write
+    // access on the target host; the preflight stops misconfiguration and
+    // pre-existing symlinks, not a racing local attacker.
     const logRoots = allowedLogRoots as string[]
-    const preflight = built.id === 'log_tail' ? buildLogTailPreflight(String(built.params.path), logRoots) : undefined
-    if (preflight === null) {
+    const readsFile = built.id === 'log_tail' || built.id === 'log_grep'
+    const preflight = readsFile ? buildLogTailPreflight(String(built.params.path), logRoots) : undefined
+    const dirPreflight = built.id === 'log_list' ? buildLogDirPreflight(String(built.params.pattern), logRoots) : undefined
+    if (preflight === null || dirPreflight === null) {
       return reject(built.id, 'invalid_catalog_request', 'readonly_diagnostic rejected: invalid catalog request')
     }
-    if (preflight) {
-      for (const argv of [preflight.resolve, preflight.regularFile]) {
-        const preflightBlocked = validateCommand(readonlyDiagnosticCommandText(argv))
-        if (preflightBlocked) return reject(built.id, 'command_blocked', `readonly_diagnostic rejected: ${preflightBlocked}`)
-      }
+    const preflightArgvs = [
+      ...(preflight ? [preflight.resolve, preflight.regularFile] : []),
+      ...(dirPreflight ? [dirPreflight.resolve] : []),
+    ]
+    for (const argv of preflightArgvs) {
+      const preflightText = readonlyDiagnosticCommandText(argv)
+      const preflightBlocked = preflightText === null ? 'unquotable argument' : validateCommand(preflightText)
+      if (preflightBlocked) return reject(built.id, 'command_blocked', `readonly_diagnostic rejected: ${preflightBlocked}`)
     }
+    // `.gz` tail and grep stream the output and keep only the last N lines.
+    const streamed =
+      built.id === 'log_grep' || (built.id === 'log_tail' && String(built.params.path).endsWith('.gz'))
 
     // Never log the command output or the credential — only the catalog id.
     logger.debug(`[readonly_diagnostic] catalogId=${built.id}`)
@@ -451,14 +471,15 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     }
     const { credential: pinnedCredential, hostKeyAlgorithms } = hostKey
     try {
-      const { executeSshCommand } = await import('./ssh-executor')
+      const { executeSshCommand, executeSshCommandStreaming } = await import('./ssh-executor')
       // All SSH calls share one timeout budget so the whole run stays within
       // what the api waits for. The credential is fetched once and reused.
       const deadline = Date.now() + timeoutSeconds * 1000
+      const remaining = (): number => Math.ceil((deadline - Date.now()) / 1000)
       const runRemote = async (argv: readonly string[]): Promise<string | null> => {
-        const remainingSeconds = Math.ceil((deadline - Date.now()) / 1000)
-        if (remainingSeconds <= 0) return null
+        const remainingSeconds = remaining()
         const text = readonlyDiagnosticCommandText(argv)
+        if (remainingSeconds <= 0 || text === null) return null
         return hostKeyAlgorithms
           ? executeSshCommand(pinnedCredential, text, remainingSeconds, { hostKeyAlgorithms })
           : executeSshCommand(pinnedCredential, text, remainingSeconds)
@@ -471,7 +492,11 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
         // executeSshCommand returns plain stdout only on exit 0, so an exact
         // match also proves readlink succeeded. Equality with the requested
         // path means no component is a symlink; re-check the allowlist anyway.
-        if (resolved !== `${path}\n` || validateReadonlyLogPath(resolved.slice(0, -1), logRoots) === null) {
+        if (
+          resolved !== `${path}\n` ||
+          validateReadonlyLogPath(resolved.slice(0, -1), logRoots) === null ||
+          !isAllowedLogFile(resolved.slice(0, -1), allowedLogPaths as string[], logRoots)
+        ) {
           return reject(built.id, 'log_path_not_plain', 'readonly_diagnostic rejected: log path is not a plain file under the allowlist (symlink or missing)')
         }
         const regular = await runRemote(preflight.regularFile)
@@ -480,10 +505,49 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
           return reject(built.id, 'log_path_not_regular', 'readonly_diagnostic rejected: log path is not a regular file')
         }
       }
+      if (dirPreflight) {
+        const resolved = await runRemote(dirPreflight.resolve)
+        if (resolved === null) return errorResult('readonly_diagnostic timed out')
+        // The directory must resolve to itself: no component is a symlink.
+        if (resolved !== `${dirPreflight.dir}\n`) {
+          return reject(built.id, 'log_dir_not_plain', 'readonly_diagnostic rejected: log directory is not a plain directory under the allowlist (symlink or missing)')
+        }
+      }
+
+      if (streamed) {
+        const remainingSeconds = remaining()
+        if (remainingSeconds <= 0) return errorResult('readonly_diagnostic timed out')
+        const ring = new LastLines(Number(built.params.lines))
+        const result = await executeSshCommandStreaming(pinnedCredential, command, remainingSeconds, {
+          onLine: (line) => ring.push(line),
+          maxBytes: READONLY_LOG_STREAM_MAX_BYTES,
+          ...(hostKeyAlgorithms ? { hostKeyAlgorithms } : {}),
+        })
+        const kept = ring.text()
+        // grep / zgrep exit 1 = no match: a success with empty output. A
+        // stream cut at the byte cap has no exit code (we closed it).
+        // Exit 124 = the remote `timeout 60` fired: the lines seen so far, truncated.
+        const remoteTimedOut = result.exitCode === READONLY_REMOTE_TIMEOUT_EXIT_CODE
+        const ok =
+          result.truncated ||
+          remoteTimedOut ||
+          result.exitCode === 0 ||
+          (built.id === 'log_grep' && result.exitCode === 1)
+        const body = ok
+          ? kept
+          : `Exit code: ${result.exitCode}\nSTDOUT:\n${kept}${result.stderr ? `\nSTDERR:\n${result.stderr}` : ''}`
+        const { text: output, truncated } = truncateUtf8(body, maxOutputBytes)
+        return successResult({ command, output, truncated: truncated || result.truncated || remoteTimedOut })
+      }
 
       const raw = await runRemote(built.argv)
       if (raw === null) return errorResult('readonly_diagnostic timed out')
-      const shaped = built.id === 'top_processes' ? firstLines(raw, TOP_PROCESSES_OUTPUT_LINES) : raw
+      const shaped =
+        built.id === 'top_processes'
+          ? firstLines(raw, TOP_PROCESSES_OUTPUT_LINES)
+          : built.id === 'log_list'
+            ? filterLogListOutput(raw)
+            : raw
       const { text: output, truncated } = truncateUtf8(shaped, maxOutputBytes)
       return successResult({ command, output, truncated })
     } catch (error) {
