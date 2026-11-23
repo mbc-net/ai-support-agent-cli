@@ -69,6 +69,18 @@ const VALID_CASES: ReadonlyArray<{
     expectedParams: { path: '/var/log/nginx/error.log', lines: 50 },
     argv: ['tail', '-n', '50', '--', '/var/log/nginx/error.log'],
   },
+  {
+    id: 'log_list',
+    params: { pattern: '/var/log/nginx/error.log' },
+    expectedParams: { pattern: '/var/log/nginx/error.log' },
+    argv: ['find', '/var/log/nginx', '-maxdepth', '1', '-type', 'f', '-name', 'error.log', '-ls'],
+  },
+  {
+    id: 'log_grep',
+    params: { path: '/var/log/nginx/error.log', text: 'upstream timed out' },
+    expectedParams: { path: '/var/log/nginx/error.log', text: 'upstream timed out', lines: 100 },
+    argv: ['timeout', '60', 'nice', '-n', '19', 'ionice', '-c', '3', 'grep', '-F', '-n', '-e', 'upstream timed out', '--', '/var/log/nginx/error.log'],
+  },
 ]
 
 describe('readonly-diagnostic-catalog', () => {
@@ -79,6 +91,8 @@ describe('readonly-diagnostic-catalog', () => {
         'disk_usage',
         'failed_units',
         'listening_ports',
+        'log_grep',
+        'log_list',
         'log_tail',
         'memory',
         'top_processes',
@@ -280,7 +294,7 @@ describe('readonly-diagnostic-catalog', () => {
     it.each(VALID_CASES)('$id', ({ id, params }) => {
       const built = buildReadonlyDiagnostic(id, params, ALLOWED)
       expect(built).not.toBeNull()
-      expect(validateCommand(readonlyDiagnosticCommandText(built!.argv))).toBeNull()
+      expect(validateCommand(readonlyDiagnosticCommandText(built!.argv)!)).toBeNull()
     })
 
     it('passes at the upper argument bounds too', () => {
@@ -290,7 +304,7 @@ describe('readonly-diagnostic-catalog', () => {
       ]
       for (const b of built) {
         expect(b).not.toBeNull()
-        expect(validateCommand(readonlyDiagnosticCommandText(b!.argv))).toBeNull()
+        expect(validateCommand(readonlyDiagnosticCommandText(b!.argv)!)).toBeNull()
       }
     })
   })
@@ -299,6 +313,14 @@ describe('readonly-diagnostic-catalog', () => {
     expect(readonlyDiagnosticCommandText(['tail', '-n', '50', '--', '/var/log/syslog'])).toBe(
       'tail -n 50 -- /var/log/syslog',
     )
+  })
+
+  it('readonlyDiagnosticCommandText single-quotes wildcard / space elements and refuses unquotable ones', () => {
+    expect(readonlyDiagnosticCommandText(['find', '/var/log/app', '-name', 'release_error.log*'])).toBe(
+      "find /var/log/app -name 'release_error.log*'",
+    )
+    expect(readonlyDiagnosticCommandText(['grep', '-e', 'a b'])).toBe("grep -e 'a b'")
+    expect(readonlyDiagnosticCommandText(['grep', '-e', "it's"])).toBeNull()
   })
 })
 
@@ -463,7 +485,7 @@ describe('validateReadonlyLogPath', () => {
 describe('validateReadonlyLogRoot', () => {
   // Mirrors the shared custom-log-roots rule table (API / CLI / web).
   describe('accepts', () => {
-    it.each(['/opt/myapp/', '/srv/web/logs/', '/home/app/logs/', '/opt/app-1/logs/', '/opt/app-1/var_log.d/'])('%s', (root) => {
+    it.each(['/opt/myapp/', '/srv/web/logs/', '/home/app/logs/', '/opt/app-1/logs/', '/opt/app-1/var_log.d/', '/mnt/disk1/app/logs/', '/mnt/data/', '/media/usb/'])('%s', (root) => {
       expect(validateReadonlyLogRoot(root)).toBe(root)
     })
 
@@ -532,8 +554,6 @@ describe('validateReadonlyLogRoot', () => {
       ['denied /var/backups/', '/var/backups/app/'],
       ['denied /var/mail/', '/var/mail/app/'],
       ['denied /var/cache/', '/var/cache/app/'],
-      ['denied /mnt/', '/mnt/data/'],
-      ['denied /media/', '/media/usb/'],
       ['denied prefix itself (/var/backups/)', '/var/backups/'],
       ['denied prefix itself (/var/cache/)', '/var/cache/'],
       ['secret segment .netrc', '/opt/app/.netrc/'],
@@ -614,8 +634,8 @@ describe('buildLogTailPreflight', () => {
 
   it('produces commands that pass validateCommand', () => {
     const preflight = buildLogTailPreflight('/var/log/syslog')!
-    expect(validateCommand(readonlyDiagnosticCommandText(preflight.resolve))).toBeNull()
-    expect(validateCommand(readonlyDiagnosticCommandText(preflight.regularFile))).toBeNull()
+    expect(validateCommand(readonlyDiagnosticCommandText(preflight.resolve)!)).toBeNull()
+    expect(validateCommand(readonlyDiagnosticCommandText(preflight.regularFile)!)).toBeNull()
   })
 })
 

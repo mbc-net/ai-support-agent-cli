@@ -195,9 +195,13 @@ export interface ReadonlyDiagnosticPayload {
   connectionFingerprint?: unknown
   catalogId?: unknown
   params?: unknown
-  /** The api's catalog argv joined with single spaces. */
+  /** The api's catalog argv, each element through quoteArg, joined with single spaces. */
   expectedCommand?: unknown
-  /** Paths `log_tail` may read, resolved by the api from project settings. */
+  /**
+   * Log path patterns (last segment may contain `*` / `?`) as configured,
+   * resolved by the api from project settings: `log_list` takes one of them,
+   * `log_tail` / `log_grep` read concrete files they match.
+   */
   allowedLogPaths?: unknown
   /** Extra log root directories (besides /var/log/), resolved by the api from project settings. */
   allowedLogRoots?: unknown

@@ -61,7 +61,7 @@ jest.mock('../../src/logger', () => ({
   },
 }))
 
-import { executeSshCommand } from '../../src/commands/ssh-executor'
+import { executeSshCommand, executeSshCommandStreaming } from '../../src/commands/ssh-executor'
 import type { SshExecCredential } from '../../src/types'
 
 const flush = () => new Promise((resolve) => setImmediate(resolve))
@@ -325,6 +325,146 @@ describe('executeSshCommand', () => {
       const allLogCalls = [...mockLoggerDebug.mock.calls, ...mockLoggerError.mock.calls]
       const serialized = JSON.stringify(allLogCalls)
       expect(serialized).not.toContain('tskey-auth-FAKE-SECRET')
+    })
+  })
+})
+
+describe('executeSshCommandStreaming', () => {
+  async function openStream(): Promise<FakeSshStream> {
+    await flush()
+    const client = lastClient!
+    client.emit('ready')
+    await flush()
+    const stream = new FakeSshStream()
+    const execCallback = client.exec.mock.calls[0][1] as (err: Error | null, stream: FakeSshStream) => void
+    execCallback(null, stream)
+    return stream
+  }
+
+  it('delivers complete lines across chunk boundaries and the final unterminated line', async () => {
+    const lines: string[] = []
+    const promise = executeSshCommandStreaming(directCredential(), 'gzip -dc -- /var/log/a.gz', 5, {
+      onLine: (l) => lines.push(l),
+      maxBytes: 1000,
+    })
+    const stream = await openStream()
+    stream.emit('data', Buffer.from('one\ntw'))
+    stream.emit('data', Buffer.from('o\nthr'))
+    stream.emit('data', Buffer.from('ee'))
+    stream.emit('close', 0)
+    await expect(promise).resolves.toEqual({ exitCode: 0, stderr: '', truncated: false })
+    expect(lines).toEqual(['one', 'two', 'three'])
+    expect(lastClient!.end).toHaveBeenCalled()
+  })
+
+  it('never splits a multibyte character across chunks', async () => {
+    const lines: string[] = []
+    const promise = executeSshCommandStreaming(directCredential(), 'x', 5, { onLine: (l) => lines.push(l), maxBytes: 1000 })
+    const stream = await openStream()
+    const bytes = Buffer.from('ログ\n')
+    stream.emit('data', bytes.subarray(0, 2))
+    stream.emit('data', bytes.subarray(2))
+    stream.emit('close', 0)
+    await promise
+    expect(lines).toEqual(['ログ'])
+  })
+
+  it('reports the exit code and (capped) stderr', async () => {
+    const promise = executeSshCommandStreaming(directCredential(), 'grep', 5, { onLine: () => undefined, maxBytes: 1000 })
+    const stream = await openStream()
+    stream.stderr.emit('data', Buffer.from('e'.repeat(5000)))
+    stream.emit('close', 2)
+    const result = await promise
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr).toHaveLength(4096)
+    expect(result.truncated).toBe(false)
+  })
+
+  it('stops reading at maxBytes, drops the partial line, and marks truncated', async () => {
+    const lines: string[] = []
+    const promise = executeSshCommandStreaming(directCredential(), 'x', 5, { onLine: (l) => lines.push(l), maxBytes: 10 })
+    const stream = await openStream()
+    stream.emit('data', Buffer.from('aaaa\nbbbb\ncccc\n'))
+    stream.emit('data', Buffer.from('dddd\n'))
+    stream.emit('close', 0)
+    await expect(promise).resolves.toEqual({ exitCode: null, stderr: '', truncated: true })
+    expect(lines).toEqual(['aaaa', 'bbbb'])
+    expect(lastClient!.end).toHaveBeenCalled()
+  })
+
+  it('caps a single very long line instead of buffering it whole', async () => {
+    const lines: string[] = []
+    const promise = executeSshCommandStreaming(directCredential(), 'x', 5, {
+      onLine: (l) => lines.push(l),
+      maxBytes: 1000,
+      maxLineBytes: 8,
+    })
+    const stream = await openStream()
+    stream.emit('data', Buffer.from('0123456789'))
+    stream.emit('data', Buffer.from('abc\nok\n'))
+    stream.emit('close', 0)
+    await promise
+    expect(lines).toEqual(['01234567', 'ok'])
+  })
+
+  it('rejects when the line callback throws', async () => {
+    const promise = executeSshCommandStreaming(directCredential(), 'x', 5, {
+      onLine: () => {
+        throw new Error('callback failed')
+      },
+      maxBytes: 1000,
+    })
+    const stream = await openStream()
+    stream.emit('data', Buffer.from('a\n'))
+    await expect(promise).rejects.toThrow('callback failed')
+  })
+
+  it('passes hostKeyAlgorithms and uses the pinned host verifier', async () => {
+    const promise = executeSshCommandStreaming(directCredential(), 'x', 5, {
+      onLine: () => undefined,
+      maxBytes: 10,
+      hostKeyAlgorithms: ['ssh-ed25519'],
+    })
+    const stream = await openStream()
+    stream.emit('close', 0)
+    await promise
+    const connectConfig = lastClient!.connect.mock.calls[0][0]
+    expect(connectConfig.algorithms).toEqual({ serverHostKey: ['ssh-ed25519'] })
+    expect(connectConfig.hostVerifier(Buffer.from('attacker-key'))).toBe(false)
+    expect(lastClient!.exec.mock.calls[0][0]).toBe('x')
+  })
+
+  it('rejects missing pins before connecting', async () => {
+    await expect(
+      executeSshCommandStreaming(directCredential({ hostKeyFingerprint: undefined }), 'x', 5, { onLine: () => undefined, maxBytes: 1 }),
+    ).rejects.toThrow('hostKeyFingerprint')
+    expect(mockClientCtor).not.toHaveBeenCalled()
+  })
+
+  it('rejects on connection and exec errors', async () => {
+    const p1 = executeSshCommandStreaming(directCredential(), 'x', 5, { onLine: () => undefined, maxBytes: 1 })
+    await flush()
+    lastClient!.emit('error', new Error('ECONNREFUSED'))
+    await expect(p1).rejects.toThrow('ECONNREFUSED')
+
+    const p2 = executeSshCommandStreaming(directCredential(), 'x', 5, { onLine: () => undefined, maxBytes: 1 })
+    await flush()
+    lastClient!.emit('ready')
+    await flush()
+    ;(lastClient!.exec.mock.calls[0][1] as (err: Error | null) => void)(new Error('exec failed'))
+    await expect(p2).rejects.toThrow('exec failed')
+  })
+
+  describe('timeout', () => {
+    beforeEach(() => jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }))
+    afterEach(() => jest.useRealTimers())
+
+    it('rejects and ends the connection after the timeout', async () => {
+      const promise = executeSshCommandStreaming(directCredential(), 'x', 2, { onLine: () => undefined, maxBytes: 10 })
+      await openStream()
+      jest.advanceTimersByTime(2000)
+      await expect(promise).rejects.toThrow(/timed out/i)
+      expect(lastClient!.end).toHaveBeenCalled()
     })
   })
 })
