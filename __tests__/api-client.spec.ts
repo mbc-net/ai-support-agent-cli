@@ -53,6 +53,24 @@ describe('ApiClient', () => {
     expect(mockInstance.post.mock.calls.at(-1)[2].headers['x-server-setup-instance-id']).toBe(identity)
   })
 
+  it('reports persisted SSH inspection and policy receipts before ordinary completion, including retries', async () => {
+    mockInstance.post.mockResolvedValue({data:{}})
+    const inspection = {machineId:'a'.repeat(32),removedRules:['rule'],observedSourceIp:'192.0.2.1',port:22}
+    const persisted = JSON.parse(JSON.stringify({success:true,data:inspection,sshSourceIpInspectionCompletion:inspection}))
+    await client.submitResult('cmd-inspect',persisted,'agent-1')
+    expect(mockInstance.post.mock.calls.slice(-2).map(call=>call[0])).toEqual([
+      '/api/test_tenant/agent/commands/cmd-inspect/ssh-source-ip-result',
+      '/api/test_tenant/agent/commands/cmd-inspect/result',
+    ])
+    expect(mockInstance.post.mock.calls.at(-1)[1]).not.toHaveProperty('sshSourceIpInspectionCompletion')
+    await client.submitResult('cmd-inspect',{success:false,error:'unsupported',sshSourceIpInspectionCompletion:{error:'unsupported'}},'agent-1')
+    expect(mockInstance.post.mock.calls.at(-2)[1]).toEqual({error:'unsupported'})
+    const policy = {attemptId:'a',policyVersion:1,definitionVersion:1,status:'pending' as const}
+    await client.submitResult('cmd-sync',{success:true,data:policy,sshSourceIpCompletion:policy},'agent-1')
+    expect(mockInstance.post.mock.calls.at(-2)[1]).toEqual(policy)
+    expect(mockInstance.post.mock.calls.at(-1)[1]).not.toHaveProperty('sshSourceIpCompletion')
+  })
+
   describe('setTenantCode', () => {
     it('should update the tenant code used in API paths', async () => {
       mockInstance.get.mockResolvedValue({ data: {} })
@@ -689,6 +707,48 @@ describe('ApiClient', () => {
 
     it('should reject an invalid commandId', async () => {
       await expect(client.getSshExecCredential('bad id!', 'agent-1')).rejects.toThrow(
+        'Invalid command ID format',
+      )
+    })
+  })
+
+  describe('getReadonlyDiagnosticCredential', () => {
+    it('should fetch the readonly_diagnostic JIT credential scoped to a commandId', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: {
+          hostId: 'asset-1',
+          hostname: 'db1.internal',
+          port: 22,
+          username: 'readonly',
+          authType: 'private_key',
+          privateKey: 'key-material',
+        },
+      })
+
+      const result = await client.getReadonlyDiagnosticCredential('cmd-1', 'agent-1')
+      expect(result.hostname).toBe('db1.internal')
+      expect(mockInstance.get).toHaveBeenCalledWith(
+        '/api/test_tenant/agent/commands/cmd-1/readonly-diagnostic-credential',
+        { params: { agentId: 'agent-1' }, headers: {} },
+      )
+    })
+
+    it('should not log the returned credential', async () => {
+      mockInstance.get.mockResolvedValue({
+        data: { hostname: 'h', username: 'u', authType: 'private_key', privateKey: 'SECRET-KEY-MATERIAL' },
+      })
+      await client.getReadonlyDiagnosticCredential('cmd-1', 'agent-1')
+      const logged = JSON.stringify([
+        mockedLogger.debug.mock.calls,
+        mockedLogger.info.mock.calls,
+        mockedLogger.warn.mock.calls,
+        mockedLogger.error.mock.calls,
+      ])
+      expect(logged).not.toContain('SECRET-KEY-MATERIAL')
+    })
+
+    it('should reject an invalid commandId', async () => {
+      await expect(client.getReadonlyDiagnosticCredential('bad id!', 'agent-1')).rejects.toThrow(
         'Invalid command ID format',
       )
     })

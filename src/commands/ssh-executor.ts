@@ -1,3 +1,4 @@
+import { createSshHostVerifier } from '../utils/ssh-host-key'
 /**
  * Ad-hoc SSH command executor used by the `ssh_exec` command handler (see
  * `commands/index.ts`). Ports the timeout / stdout+stderr aggregation /
@@ -79,17 +80,12 @@ async function createTailscaleSocksSocket(credential: SshExecCredential): Promis
   }
 }
 
-/**
- * Execute `command` over SSH against the host described by `credential`,
- * returning combined stdout/stderr formatted the same way as the api-side
- * `SshTool.executeViaSsh`: plain stdout on a clean (0) exit, or an
- * "Exit code: N\nSTDOUT:\n...\nSTDERR:\n..." block otherwise.
- */
-export async function executeSshCommand(
+/** Validated credential → ssh2 Client constructor + connect config (no connection opened yet). */
+async function prepareSshConnection(
   credential: SshExecCredential,
-  command: string,
-  timeoutSeconds: number = DEFAULT_SSH_EXEC_TIMEOUT_SECONDS,
-): Promise<string> {
+  timeoutSeconds: number,
+  options: { hostKeyAlgorithms?: readonly string[] },
+): Promise<{ Client: typeof import('ssh2').Client; connectConfig: Record<string, unknown> }> {
   if (!credential.hostname || !credential.username || !credential.authType) {
     throw new Error('SSH connection requires hostname, username, and authType to be set')
   }
@@ -106,11 +102,52 @@ export async function executeSshCommand(
   // Resolved (and, for Tailscale, connected) before the ssh2 Client is even
   // constructed: a SOCKS5 failure must surface as-is, not as a subsequent
   // ssh2 'error' event that could read as a plain connection error.
+  const hostVerifier = createSshHostVerifier(credential.hostKeyFingerprint)
+
   const sock = credential.connectionType === 'tailscale'
     ? await createTailscaleSocksSocket(credential)
     : undefined
 
   const { Client } = await import('ssh2')
+
+  const connectConfig: Record<string, unknown> = {
+    hostVerifier,
+    username: credential.username,
+    readyTimeout: timeoutSeconds * 1000,
+    ...(credential.authType === 'password'
+      ? { password: credential.privateKey }
+      : { privateKey: credential.privateKey }),
+  }
+  if (options.hostKeyAlgorithms) {
+    connectConfig.algorithms = { serverHostKey: [...options.hostKeyAlgorithms] }
+  }
+
+  if (sock) {
+    connectConfig.sock = sock
+  } else {
+    connectConfig.host = credential.hostname
+    connectConfig.port = credential.port || DEFAULT_SSH_PORT
+  }
+  return { Client, connectConfig }
+}
+
+/**
+ * Execute `command` over SSH against the host described by `credential`,
+ * returning combined stdout/stderr formatted the same way as the api-side
+ * `SshTool.executeViaSsh`: plain stdout on a clean (0) exit, or an
+ * "Exit code: N\nSTDOUT:\n...\nSTDERR:\n..." block otherwise.
+ *
+ * `options.hostKeyAlgorithms` restricts host-key negotiation to the algorithms
+ * that present the pinned key's type, so a pin taken from known_hosts (one
+ * key type) is not defeated by the server offering a different type first.
+ */
+export async function executeSshCommand(
+  credential: SshExecCredential,
+  command: string,
+  timeoutSeconds: number = DEFAULT_SSH_EXEC_TIMEOUT_SECONDS,
+  options: { hostKeyAlgorithms?: readonly string[] } = {},
+): Promise<string> {
+  const { Client, connectConfig } = await prepareSshConnection(credential, timeoutSeconds, options)
 
   return new Promise<string>((resolve, reject) => {
     const conn = new Client()
@@ -163,20 +200,148 @@ export async function executeSshCommand(
       reject(err)
     })
 
-    const connectConfig: Record<string, unknown> = {
-      username: credential.username,
-      readyTimeout: timeoutSeconds * 1000,
-      ...(credential.authType === 'password'
-        ? { password: credential.privateKey }
-        : { privateKey: credential.privateKey }),
+    conn.connect(connectConfig)
+  })
+}
+
+/** Options of executeSshCommandStreaming. */
+export interface SshStreamingOptions {
+  /** Restrict host-key negotiation (see executeSshCommand). */
+  hostKeyAlgorithms?: readonly string[]
+  /** Called for every stdout line (without the trailing `\n`), in order. */
+  onLine: (line: string) => void
+  /** Stop reading (and close the connection) after this many stdout bytes. */
+  maxBytes: number
+  /** A longer line is cut to this many bytes (default 64 KiB) so one line cannot hold the whole stream. */
+  maxLineBytes?: number
+  /** stderr kept for the result (default 4 KiB). */
+  maxStderrBytes?: number
+}
+
+export interface SshStreamingResult {
+  /** Remote exit code; null when the stream was cut at maxBytes (or no code was reported). */
+  exitCode: number | null
+  /** stderr, cut to maxStderrBytes. */
+  stderr: string
+  /** True when reading stopped at maxBytes; the partial last line is dropped. */
+  truncated: boolean
+}
+
+const DEFAULT_STREAM_MAX_LINE_BYTES = 64 * 1024
+const DEFAULT_STREAM_MAX_STDERR_BYTES = 4096
+
+/**
+ * Opt-in streaming variant of executeSshCommand for large outputs: stdout is
+ * never accumulated, it is split into lines and handed to `options.onLine`.
+ * Reading stops after `options.maxBytes` stdout bytes (the connection is
+ * closed and the result is marked truncated). Same connection, host-key and
+ * timeout handling as executeSshCommand, which is unchanged.
+ */
+export async function executeSshCommandStreaming(
+  credential: SshExecCredential,
+  command: string,
+  timeoutSeconds: number,
+  options: SshStreamingOptions,
+): Promise<SshStreamingResult> {
+  const { Client, connectConfig } = await prepareSshConnection(credential, timeoutSeconds, options)
+  const maxLineBytes = options.maxLineBytes ?? DEFAULT_STREAM_MAX_LINE_BYTES
+  const maxStderrBytes = options.maxStderrBytes ?? DEFAULT_STREAM_MAX_STDERR_BYTES
+
+  return new Promise<SshStreamingResult>((resolve, reject) => {
+    const conn = new Client()
+    let settled = false
+    let received = 0
+    let pending: Buffer[] = []
+    let pendingBytes = 0
+    let stderr = Buffer.alloc(0)
+
+    const finish = (settle: () => void): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      conn.end()
+      settle()
     }
 
-    if (sock) {
-      connectConfig.sock = sock
-    } else {
-      connectConfig.host = credential.hostname
-      connectConfig.port = credential.port || DEFAULT_SSH_PORT
+    const timer = setTimeout(() => {
+      finish(() => reject(new Error(`SSH command timed out after ${timeoutSeconds}s`)))
+    }, timeoutSeconds * 1000)
+
+    const appendPending = (part: Buffer): void => {
+      const room = maxLineBytes - pendingBytes
+      if (room <= 0) return
+      const kept = part.length > room ? part.subarray(0, room) : part
+      pending.push(kept)
+      pendingBytes += kept.length
     }
+    const emitLine = (): void => {
+      const line = Buffer.concat(pending).toString('utf8')
+      pending = []
+      pendingBytes = 0
+      options.onLine(line)
+    }
+
+    conn.on('ready', () => {
+      conn.exec(command, (err, stream) => {
+        if (err) {
+          finish(() => reject(err))
+          return
+        }
+
+        stream.on('data', (data: Buffer) => {
+          if (settled) return
+          let chunk = data
+          if (received + chunk.length > options.maxBytes) chunk = chunk.subarray(0, options.maxBytes - received)
+          received += chunk.length
+          try {
+            let start = 0
+            let newline = chunk.indexOf(0x0a, start)
+            while (newline >= 0) {
+              appendPending(chunk.subarray(start, newline))
+              emitLine()
+              start = newline + 1
+              newline = chunk.indexOf(0x0a, start)
+            }
+            appendPending(chunk.subarray(start))
+          } catch (error) {
+            finish(() => reject(error))
+            return
+          }
+          if (received >= options.maxBytes) {
+            // The partial last line is dropped: it may be cut mid-line.
+            pending = []
+            pendingBytes = 0
+            finish(() => resolve({ exitCode: null, stderr: stderr.toString('utf8'), truncated: true }))
+          }
+        })
+
+        stream.stderr.on('data', (data: Buffer) => {
+          const room = maxStderrBytes - stderr.length
+          if (room > 0) stderr = Buffer.concat([stderr, data.subarray(0, room)])
+        })
+
+        stream.on('close', (code: unknown) => {
+          if (settled) return
+          try {
+            if (pendingBytes > 0) emitLine()
+          } catch (error) {
+            finish(() => reject(error))
+            return
+          }
+          finish(() =>
+            resolve({
+              exitCode: typeof code === 'number' ? code : null,
+              stderr: stderr.toString('utf8'),
+              truncated: false,
+            }),
+          )
+        })
+      })
+    })
+
+    conn.on('error', (err) => {
+      finish(() => reject(err))
+    })
 
     conn.connect(connectConfig)
   })

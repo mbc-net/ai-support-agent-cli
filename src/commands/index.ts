@@ -2,8 +2,9 @@ import type { ApiClient } from '../api-client'
 import { ERR_CHAT_REQUIRES_CLIENT, ERR_E2E_TEST_REQUIRES_CLIENT, ERR_CONFIG_SYNC_REQUIRES_CALLBACK, ERR_REBOOT_REQUIRES_CALLBACK, ERR_SETUP_REQUIRES_CALLBACK, ERR_UPDATE_REQUIRES_CALLBACK, ERR_SYNC_REPOSITORY_REQUIRES_CALLBACK, LOG_DEBUG_LIMIT } from '../constants'
 import { logger } from '../logger'
 import { getWorkspaceDir } from '../project-dir'
-import { type AgentChatMode, type AgentCommandType, type CommandDispatch, type CommandResult, errorResult, type ServerSetupExecPayload, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
+import { type AgentChatMode, type AgentCommandType, type CommandDispatch, type CommandResult, errorResult, type ReadonlyDiagnosticPayload, type ServerSetupExecPayload, type SshExecCredential, type SshExecPayload, type SyncRepositoryPayload, successResult } from '../types'
 import type { RepoSyncResult } from '../repo-sync'
+import { validateCommand } from '../security'
 import { getErrorMessage } from '../utils'
 
 import { type AgentExecutionContext, forwardAgentExecutionContext } from './agent-execution-context'
@@ -52,6 +53,11 @@ export interface ExecuteCommandOptions extends AgentExecutionContext {
   /** E2E 専用のブラウザーセッションを実行後にクローズするコールバック。 */
   closeBrowserSession?: (sessionId: string) => Promise<void>
 }
+
+/** Bounds for the agent-side timeout of a readonly_diagnostic command (seconds). */
+const READONLY_DIAGNOSTIC_MIN_TIMEOUT_SECONDS = 5
+const READONLY_DIAGNOSTIC_MAX_TIMEOUT_SECONDS = 60
+const READONLY_DIAGNOSTIC_DEFAULT_TIMEOUT_SECONDS = 30
 
 /** Execution context passed to each handler */
 interface CommandContext {
@@ -275,6 +281,17 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
     return ecsStop(p)
   },
 
+  ssh_source_ip_sync: async ({ p, opts }) => {
+    if (!opts.commandId || !opts.client) return errorResult('SSH policy requires client context')
+    const { runSshSourceIpSync } = await import('../server-setup/ssh-source-ip-sync')
+    return runSshSourceIpSync(p, {commandId:opts.commandId,client:opts.client,agentId:opts.agentId})
+  },
+  ssh_source_ip_inspect: async ({ p, opts }) => {
+    if (!opts.commandId || !opts.client) return errorResult('SSH policy inspection requires client context')
+    const { runSshSourceIpSync } = await import('../server-setup/ssh-source-ip-sync')
+    return runSshSourceIpSync(p, {commandId:opts.commandId,client:opts.client,agentId:opts.agentId}, true)
+  },
+
   server_setup_exec: async ({ p, opts }) => {
     // Loaded lazily so agents that never run server setup do not pay the
     // Ansible dispatch cost. Payload/response may involve an SSH private
@@ -325,6 +342,214 @@ const COMMAND_HANDLERS: Record<AgentCommandType, CommandHandler> = {
       const credential = await fetchSshExecCredential(opts.client, opts.commandId, opts.agentId ?? '')
       const output = await executeSshCommand(credential, command, timeoutSeconds)
       return successResult(output)
+    } catch (error) {
+      return errorResult(getErrorMessage(error))
+    }
+  },
+
+  readonly_diagnostic: async ({ p, opts }) => {
+    // Alarm AI-check read-only diagnostic. Unlike ssh_exec, the command string
+    // is never taken from the payload: the argv is rebuilt from the local
+    // catalog and must match the api's expectedCommand. The JIT credential is
+    // single-use (409 on a second fetch) — never log it and never re-fetch.
+    if (!opts.commandId || !opts.client) {
+      return errorResult('readonly_diagnostic requires client context')
+    }
+    const payload = p as ReadonlyDiagnosticPayload
+    const commandId = opts.commandId
+    // Every rejection is logged at info with only the command id, the catalog
+    // id (when it is a plain identifier) and a fixed reason code — never the
+    // command output, the credential or key material.
+    const reject = (catalogId: unknown, reason: string, error: string): CommandResult => {
+      const id = typeof catalogId === 'string' && /^[a-z_]{1,64}$/.test(catalogId) ? catalogId : 'invalid'
+      logger.info(`[readonly_diagnostic] rejected commandId=${commandId} catalogId=${id} reason=${reason}`)
+      return errorResult(error)
+    }
+    const {
+      buildLogDirPreflight,
+      buildLogTailPreflight,
+      buildReadonlyDiagnostic,
+      filterLogListOutput,
+      firstLines,
+      isAllowedLogFile,
+      LastLines,
+      READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES,
+      READONLY_LOG_ROOTS_MAX,
+      READONLY_LOG_STREAM_MAX_BYTES,
+      READONLY_REMOTE_TIMEOUT_EXIT_CODE,
+      readonlyDiagnosticCommandText,
+      TOP_PROCESSES_OUTPUT_LINES,
+      truncateUtf8,
+      validateReadonlyLogPath,
+      validateReadonlyLogRoot,
+    } = await import('./readonly-diagnostic-catalog')
+
+    const allowedLogPaths = payload.allowedLogPaths
+    // Unset roots = no extra roots (older api). Any malformed root rejects the
+    // whole request instead of being silently dropped.
+    const allowedLogRoots = payload.allowedLogRoots ?? []
+    const rootsValid =
+      Array.isArray(allowedLogRoots) &&
+      allowedLogRoots.length <= READONLY_LOG_ROOTS_MAX &&
+      allowedLogRoots.every((root) => validateReadonlyLogRoot(root) !== null)
+    const built =
+      rootsValid && Array.isArray(allowedLogPaths) && allowedLogPaths.every((path) => typeof path === 'string')
+        ? buildReadonlyDiagnostic(payload.catalogId, payload.params, {
+            allowedLogPaths,
+            allowedLogRoots: allowedLogRoots as string[],
+          })
+        : null
+    if (!built) {
+      return reject(payload.catalogId, 'invalid_catalog_request', 'readonly_diagnostic rejected: invalid catalog request')
+    }
+    const command = readonlyDiagnosticCommandText(built.argv)
+    if (command === null || command !== payload.expectedCommand) {
+      return reject(built.id, 'command_mismatch', 'readonly_diagnostic rejected: command mismatch')
+    }
+    const blocked = validateCommand(command)
+    if (blocked) {
+      return reject(built.id, 'command_blocked', `readonly_diagnostic rejected: ${blocked}`)
+    }
+    // The asset UID namespaces the host-key pin server setup recorded for it.
+    const assetUid = payload.assetUid
+    if (typeof assetUid !== 'string' || !assetUid) {
+      return reject(built.id, 'invalid_asset', 'readonly_diagnostic rejected: invalid asset')
+    }
+
+    const rawTimeout = payload.timeoutSeconds
+    const timeoutSeconds = typeof rawTimeout === 'number' && Number.isFinite(rawTimeout)
+      ? Math.min(Math.max(rawTimeout, READONLY_DIAGNOSTIC_MIN_TIMEOUT_SECONDS), READONLY_DIAGNOSTIC_MAX_TIMEOUT_SECONDS)
+      : READONLY_DIAGNOSTIC_DEFAULT_TIMEOUT_SECONDS
+    const rawMaxBytes = payload.maxOutputBytes
+    const maxOutputBytes = typeof rawMaxBytes === 'number' && Number.isInteger(rawMaxBytes) && rawMaxBytes > 0
+      ? Math.min(rawMaxBytes, READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES)
+      : READONLY_DIAGNOSTIC_MAX_OUTPUT_BYTES
+
+    // log_tail / log_grep (a concrete file) and log_list (its directory):
+    // prepare the symlink / regular-file checks up front so a bad path is
+    // rejected before the single-use credential is consumed.
+    // Known limitation (TOCTOU): the preflight and the read are separate SSH
+    // execs, so someone with write access to the log directory could swap the
+    // file for a symlink in between. Accepted: that already requires write
+    // access on the target host; the preflight stops misconfiguration and
+    // pre-existing symlinks, not a racing local attacker.
+    const logRoots = allowedLogRoots as string[]
+    const readsFile = built.id === 'log_tail' || built.id === 'log_grep'
+    const preflight = readsFile ? buildLogTailPreflight(String(built.params.path), logRoots) : undefined
+    const dirPreflight = built.id === 'log_list' ? buildLogDirPreflight(String(built.params.pattern), logRoots) : undefined
+    if (preflight === null || dirPreflight === null) {
+      return reject(built.id, 'invalid_catalog_request', 'readonly_diagnostic rejected: invalid catalog request')
+    }
+    const preflightArgvs = [
+      ...(preflight ? [preflight.resolve, preflight.regularFile] : []),
+      ...(dirPreflight ? [dirPreflight.resolve] : []),
+    ]
+    for (const argv of preflightArgvs) {
+      const preflightText = readonlyDiagnosticCommandText(argv)
+      const preflightBlocked = preflightText === null ? 'unquotable argument' : validateCommand(preflightText)
+      if (preflightBlocked) return reject(built.id, 'command_blocked', `readonly_diagnostic rejected: ${preflightBlocked}`)
+    }
+    // `.gz` tail and grep stream the output and keep only the last N lines.
+    const streamed =
+      built.id === 'log_grep' || (built.id === 'log_tail' && String(built.params.path).endsWith('.gz'))
+
+    // Never log the command output or the credential — only the catalog id.
+    logger.debug(`[readonly_diagnostic] catalogId=${built.id}`)
+    let credential: SshExecCredential
+    try {
+      credential = await opts.client.getReadonlyDiagnosticCredential(opts.commandId, opts.agentId ?? '')
+    } catch (error) {
+      return errorResult(`Failed to fetch read-only diagnostic credential: ${getErrorMessage(error)}`)
+    }
+    // Ledger connections carry no host-key fingerprint: fall back to the key
+    // server setup pinned for this asset (read-only; never TOFU here). Done
+    // after the fetch (host/port come from the credential), before any SSH.
+    const { resolveReadonlyDiagnosticHostKey } = await import('./readonly-diagnostic-host-key')
+    const hostKey = await resolveReadonlyDiagnosticHostKey(credential, assetUid, opts.client.getTenantCode())
+    if (!hostKey.ok) {
+      return reject(built.id, hostKey.reason, hostKey.error)
+    }
+    const { credential: pinnedCredential, hostKeyAlgorithms } = hostKey
+    try {
+      const { executeSshCommand, executeSshCommandStreaming } = await import('./ssh-executor')
+      // All SSH calls share one timeout budget so the whole run stays within
+      // what the api waits for. The credential is fetched once and reused.
+      const deadline = Date.now() + timeoutSeconds * 1000
+      const remaining = (): number => Math.ceil((deadline - Date.now()) / 1000)
+      const runRemote = async (argv: readonly string[]): Promise<string | null> => {
+        const remainingSeconds = remaining()
+        const text = readonlyDiagnosticCommandText(argv)
+        if (remainingSeconds <= 0 || text === null) return null
+        return hostKeyAlgorithms
+          ? executeSshCommand(pinnedCredential, text, remainingSeconds, { hostKeyAlgorithms })
+          : executeSshCommand(pinnedCredential, text, remainingSeconds)
+      }
+
+      if (preflight) {
+        const path = String(built.params.path)
+        const resolved = await runRemote(preflight.resolve)
+        if (resolved === null) return errorResult('readonly_diagnostic timed out')
+        // executeSshCommand returns plain stdout only on exit 0, so an exact
+        // match also proves readlink succeeded. Equality with the requested
+        // path means no component is a symlink; re-check the allowlist anyway.
+        if (
+          resolved !== `${path}\n` ||
+          validateReadonlyLogPath(resolved.slice(0, -1), logRoots) === null ||
+          !isAllowedLogFile(resolved.slice(0, -1), allowedLogPaths as string[], logRoots)
+        ) {
+          return reject(built.id, 'log_path_not_plain', 'readonly_diagnostic rejected: log path is not a plain file under the allowlist (symlink or missing)')
+        }
+        const regular = await runRemote(preflight.regularFile)
+        if (regular === null) return errorResult('readonly_diagnostic timed out')
+        if (regular !== '') {
+          return reject(built.id, 'log_path_not_regular', 'readonly_diagnostic rejected: log path is not a regular file')
+        }
+      }
+      if (dirPreflight) {
+        const resolved = await runRemote(dirPreflight.resolve)
+        if (resolved === null) return errorResult('readonly_diagnostic timed out')
+        // The directory must resolve to itself: no component is a symlink.
+        if (resolved !== `${dirPreflight.dir}\n`) {
+          return reject(built.id, 'log_dir_not_plain', 'readonly_diagnostic rejected: log directory is not a plain directory under the allowlist (symlink or missing)')
+        }
+      }
+
+      if (streamed) {
+        const remainingSeconds = remaining()
+        if (remainingSeconds <= 0) return errorResult('readonly_diagnostic timed out')
+        const ring = new LastLines(Number(built.params.lines))
+        const result = await executeSshCommandStreaming(pinnedCredential, command, remainingSeconds, {
+          onLine: (line) => ring.push(line),
+          maxBytes: READONLY_LOG_STREAM_MAX_BYTES,
+          ...(hostKeyAlgorithms ? { hostKeyAlgorithms } : {}),
+        })
+        const kept = ring.text()
+        // grep / zgrep exit 1 = no match: a success with empty output. A
+        // stream cut at the byte cap has no exit code (we closed it).
+        // Exit 124 = the remote `timeout 60` fired: the lines seen so far, truncated.
+        const remoteTimedOut = result.exitCode === READONLY_REMOTE_TIMEOUT_EXIT_CODE
+        const ok =
+          result.truncated ||
+          remoteTimedOut ||
+          result.exitCode === 0 ||
+          (built.id === 'log_grep' && result.exitCode === 1)
+        const body = ok
+          ? kept
+          : `Exit code: ${result.exitCode}\nSTDOUT:\n${kept}${result.stderr ? `\nSTDERR:\n${result.stderr}` : ''}`
+        const { text: output, truncated } = truncateUtf8(body, maxOutputBytes)
+        return successResult({ command, output, truncated: truncated || result.truncated || remoteTimedOut })
+      }
+
+      const raw = await runRemote(built.argv)
+      if (raw === null) return errorResult('readonly_diagnostic timed out')
+      const shaped =
+        built.id === 'top_processes'
+          ? firstLines(raw, TOP_PROCESSES_OUTPUT_LINES)
+          : built.id === 'log_list'
+            ? filterLogListOutput(raw)
+            : raw
+      const { text: output, truncated } = truncateUtf8(shaped, maxOutputBytes)
+      return successResult({ command, output, truncated })
     } catch (error) {
       return errorResult(getErrorMessage(error))
     }

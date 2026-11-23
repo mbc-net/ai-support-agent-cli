@@ -42,6 +42,7 @@ import {
 } from './constants'
 import { calculateBackoff } from './retry-strategy'
 import { getConfigDir } from './config-manager'
+import { READONLY_DIAGNOSTIC_CAPABILITY } from './commands/readonly-diagnostic-catalog'
 import { detectEcsLauncherCapability } from './ecs/launcher-capability'
 import { t } from './i18n'
 import { logger } from './logger'
@@ -586,6 +587,7 @@ export class ProjectAgent {
   async performConfigSync(commandId?: string): Promise<void> {
     // ブラウザローカルポートを動的に更新（VSCode tunnel接続後に判明）
     this.configSyncDeps.browserLocalPort = this.transportState.vsCodeWs?.getBrowserLocalPort()
+    this.configSyncDeps.browserLocalToken = this.transportState.vsCodeWs?.getBrowserLocalToken()
     // API通知の configHash はRDS同期前の古い値の可能性があるため、
     // config_update を受け取ったときは currentConfigHash をリセットして強制再同期する
     this.configSyncState.currentConfigHash = undefined
@@ -1078,9 +1080,14 @@ export class ProjectAgent {
         // recipe to any agent that does not advertise this capability.
         SERVER_SETUP_CUSTOM_TASKS_CAPABILITY,
         SENTRY_CAPABILITY,
+        'ssh_source_ip_sync_v1',
         // Can run server-setup recipes against Windows hosts over OpenSSH; the
         // api requires this before dispatching a Windows run.
         SERVER_SETUP_WINDOWS_OPENSSH_CAPABILITY,
+        // Can run the alarm AI check's catalog-only read-only diagnostics
+        // (`readonly_diagnostic`); the api dispatches them only to replicas
+        // that advertise this capability.
+        READONLY_DIAGNOSTIC_CAPABILITY,
         ...(ecsLauncher ? ['ecs_launch'] : []),
       ],
       availableChatModes: this.configSyncState.availableChatModes,

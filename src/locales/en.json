@@ -219,6 +219,8 @@
   "docker.dockerAssetSyncFailed": "Failed to sync bundled config {{path}}: {{message}}",
   "docker.diffNoTarget": "No Dockerfile to diff. Specify a path or set dockerfilePath in config.",
   "docker.diffTargetNotFound": "Dockerfile not found: {{path}}",
+  "docker.configDockerfileRefused": "Refusing to build from {{path}}: {{reason}}",
+  "docker.diffTargetUnreadable": "Cannot read {{path}}: {{message}}",
   "docker.diffIdentical": "Dockerfile is identical to the bundled default.",
   "docker.diffDone": "Diff complete.",
   "docker.diffDefaultError": "Failed to read bundled Dockerfile: {{message}}",

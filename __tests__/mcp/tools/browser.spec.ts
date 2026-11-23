@@ -865,6 +865,7 @@ describe('browser tools', () => {
       // No browserSessionId, but local port is set → triggers resolveFirstSessionId
       delete process.env.AI_SUPPORT_BROWSER_SESSION_ID
       process.env.AI_SUPPORT_BROWSER_LOCAL_PORT = '19999'
+      process.env.AI_SUPPORT_BROWSER_LOCAL_TOKEN = 'fixture-child-token'
       lastProxyInstance = null
       jest.clearAllMocks()
       mockIsPlaywrightAvailable.mockReturnValue(true)
@@ -928,7 +929,7 @@ describe('browser tools', () => {
       mockHttpModule.get = jest.fn().mockImplementation(
         (_url: string, _opts: unknown, cb: (res: EventEmitter) => void) => {
           callCount++
-          const mockRes = new EventEmitter()
+          const mockRes = Object.assign(new EventEmitter(), { statusCode: 200 })
           // Emit response data synchronously via Promise.resolve
           Promise.resolve().then(() => {
             cb(mockRes)
@@ -974,7 +975,7 @@ describe('browser tools', () => {
       // Mock http.get to return a valid session ID via Promise.resolve
       mockHttpModule.get = jest.fn().mockImplementation(
         (_url: string, _opts: unknown, cb: (res: EventEmitter) => void) => {
-          const mockRes = new EventEmitter()
+          const mockRes = Object.assign(new EventEmitter(), { statusCode: 200 })
           Promise.resolve().then(() => {
             cb(mockRes)
             mockRes.emit('data', Buffer.from(JSON.stringify({ sessionId: 'resolved-abc' })))
@@ -998,6 +999,8 @@ describe('browser tools', () => {
       const result = await resultPromise as { content: Array<{ text?: string }> }
 
       jest.useRealTimers()
+
+      expect(mockHttpModule.get).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ headers: { Authorization: 'Bearer fixture-child-token' } }), expect.any(Function))
 
       // Should have created a proxy session or fallen back to default — both are valid
       expect(result).toBeDefined()

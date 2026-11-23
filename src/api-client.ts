@@ -532,7 +532,13 @@ export class ApiClient {
   ): Promise<void> {
     this.validateCommandId(commandId)
     logger.debug(`Submitting result for command: ${commandId}`)
-    const { e2eConfigurationCompletion, serverSetupConfigurationCompletion, ...wireResult } = result
+    const { e2eConfigurationCompletion, serverSetupConfigurationCompletion, sshSourceIpCompletion, sshSourceIpInspectionCompletion, ...wireResult } = result
+    if (sshSourceIpInspectionCompletion) {
+      await this.submitSshSourceIpResult(commandId,agentId,sshSourceIpInspectionCompletion)
+    }
+    if (sshSourceIpCompletion) {
+      await this.submitSshSourceIpResult(commandId,agentId,sshSourceIpCompletion)
+    }
     await this.postVoid(
       API_ENDPOINTS.COMMAND_RESULT(this.tenantCode, commandId),
       wireResult,
@@ -629,6 +635,18 @@ export class ApiClient {
    * `buildInventory`. Never log the returned credential; only log the
    * commandId.
    */
+  async getSshSourceIpCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
+    return this.getCommandScopedResource<SshExecCredential>(commandId,agentId,
+      `/api/${this.tenantCode}/agent/commands/${commandId}/ssh-source-ip-credential`,
+      `Fetching SSH policy credential for command: ${commandId}`)
+  }
+
+  async submitSshSourceIpResult(commandId: string, agentId: string, result: import('./server-setup/ssh-source-ip-sync').SshSourceIpResult | import('./server-setup/ssh-source-ip-sync').SshSourceIpInspectionResult): Promise<void> {
+    this.validateCommandId(commandId)
+    await this.postVoid(`/api/${this.tenantCode}/agent/commands/${commandId}/ssh-source-ip-result`,result,
+      {params:{agentId},headers:this.assignmentHeaders(commandId)})
+  }
+
   async getServerSetupSshCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
     return this.getCommandScopedResource<SshExecCredential>(
       commandId,
@@ -671,6 +689,22 @@ export class ApiClient {
       agentId,
       API_ENDPOINTS.SSH_EXEC_CREDENTIAL(this.tenantCode, commandId),
       `Fetching SSH exec credential for command: ${commandId}`,
+    )
+  }
+
+  /**
+   * Single-use JIT SSH credential for a `readonly_diagnostic` command (alarm
+   * AI check). Same commandId-scoped design as `getSshExecCredential`: the
+   * target is resolved server-side from the command's payload. The api
+   * answers 409 to a second fetch, so callers must not re-fetch. Never log
+   * the returned credential; only log the commandId.
+   */
+  async getReadonlyDiagnosticCredential(commandId: string, agentId: string): Promise<SshExecCredential> {
+    return this.getCommandScopedResource<SshExecCredential>(
+      commandId,
+      agentId,
+      API_ENDPOINTS.READONLY_DIAGNOSTIC_CREDENTIAL(this.tenantCode, commandId),
+      `Fetching read-only diagnostic credential for command: ${commandId}`,
     )
   }
 

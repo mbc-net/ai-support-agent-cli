@@ -89,6 +89,7 @@ const sshTunnel = (via: Record<string, unknown> = {}): RdpSshTunnel =>
       username: 'ops',
       authType: 'privateKey',
       credential: SSH_KEY,
+      hostKeyFingerprint: 'SHA256:' + 'A'.repeat(43),
       ...via,
     },
   }) as RdpSshTunnel

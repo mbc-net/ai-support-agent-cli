@@ -1,3 +1,4 @@
+import type { SshSourceIpPayload } from '../server-setup/ssh-source-ip-sync'
 import type { ChatPayload } from './chat'
 import type { EcsLaunchPayload, EcsStopPayload } from './ecs'
 import type { ServerSetupExecPayload } from './server-setup'
@@ -24,9 +25,12 @@ export type AgentCommandType =
   | 'sync_repository'
   | 'ecs_launch'
   | 'ecs_stop'
+  | 'ssh_source_ip_sync'
+  | 'ssh_source_ip_inspect'
   | 'server_setup_exec'
   | 'server_setup_cancel'
   | 'ssh_exec'
+  | 'readonly_diagnostic'
   | 'tls_cert_check'
   | 'backup_inspect'
   | 'backup_export'
@@ -59,6 +63,9 @@ export type CommandResult = (
   | { success: true; data: unknown }
   | { success: false; error: string; data?: unknown }
 ) & {
+  /** Dedicated SSH policy receipt, persisted before submitting and omitted from ordinary result wire data. */
+  sshSourceIpInspectionCompletion?: import('../server-setup/ssh-source-ip-sync').SshSourceIpInspectionResult
+  sshSourceIpCompletion?: import('../server-setup/ssh-source-ip-sync').SshSourceIpResult
   /** Internal agent proof: attached only after E2E child processes have closed.
    * Persisted with pending results, stripped before submitting the result body. */
   e2eConfigurationCompletion?: { executionId: string }
@@ -173,6 +180,35 @@ export interface SshExecPayload {
   timeoutSeconds?: unknown
 }
 
+/**
+ * Payload of the `readonly_diagnostic` command (alarm AI check). Issued by the
+ * api; the agent treats every field as untrusted. It rebuilds the argv from
+ * `catalogId` / `params` / `allowedLogPaths` with its own catalog
+ * (`commands/readonly-diagnostic-catalog.ts`) and only runs it when the result
+ * equals `expectedCommand` — the command string itself is never executed as
+ * given. `assetUid` / `connectionUid` / `connectionFingerprint` are used by the
+ * api to resolve the single-use JIT credential and are not read by the agent.
+ */
+export interface ReadonlyDiagnosticPayload {
+  assetUid?: unknown
+  connectionUid?: unknown
+  connectionFingerprint?: unknown
+  catalogId?: unknown
+  params?: unknown
+  /** The api's catalog argv, each element through quoteArg, joined with single spaces. */
+  expectedCommand?: unknown
+  /**
+   * Log path patterns (last segment may contain `*` / `?`) as configured,
+   * resolved by the api from project settings: `log_list` takes one of them,
+   * `log_tail` / `log_grep` read concrete files they match.
+   */
+  allowedLogPaths?: unknown
+  /** Extra log root directories (besides /var/log/), resolved by the api from project settings. */
+  allowedLogRoots?: unknown
+  timeoutSeconds?: unknown
+  maxOutputBytes?: unknown
+}
+
 // Discriminated union for type-safe command dispatch
 export type CommandDispatch =
   | { type: 'execute_command'; payload: ShellCommandPayload }
@@ -195,9 +231,12 @@ export type CommandDispatch =
   | { type: 'sync_repository'; payload: SyncRepositoryPayload }
   | { type: 'ecs_launch'; payload: EcsLaunchPayload }
   | { type: 'ecs_stop'; payload: EcsStopPayload }
+  | { type: 'ssh_source_ip_sync'; payload: SshSourceIpPayload }
+  | { type: 'ssh_source_ip_inspect'; payload: SshSourceIpPayload }
   | { type: 'server_setup_exec'; payload: ServerSetupExecPayload }
   | { type: 'server_setup_cancel'; payload: ServerSetupCancelPayload }
   | { type: 'ssh_exec'; payload: SshExecPayload }
+  | { type: 'readonly_diagnostic'; payload: ReadonlyDiagnosticPayload }
   | { type: 'tls_cert_check'; payload: TlsCertCheckPayload }
   | { type: 'backup_inspect'; payload: Record<string, unknown> }
   | { type: 'backup_export'; payload: Record<string, unknown> }

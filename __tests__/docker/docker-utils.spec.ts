@@ -28,10 +28,24 @@ jest.mock('../../src/logger', () => ({
 jest.mock('../../src/docker/dockerfile-path', () => ({
   resolveDockerfile: jest.fn((customPath?: string) => {
     if (customPath) {
-      return { dockerfilePath: customPath, contextDir: require('path').dirname(customPath) }
+      return { dockerfilePath: customPath, contextDir: require('path').dirname(customPath), fromConfigDir: false }
     }
-    return { dockerfilePath: '/mock/docker/Dockerfile', contextDir: '/mock' }
+    return { dockerfilePath: '/mock/docker/Dockerfile', contextDir: '/mock', fromConfigDir: false }
   }),
+}))
+
+jest.mock('../../src/utils/path-utils', () => ({
+  ...jest.requireActual('../../src/utils/path-utils'),
+  getBuildSnapshotsDir: jest.fn(() => '/config/.build-snapshots'),
+  prepareSnapshotsDir: jest.fn(),
+}))
+
+// The snapshot itself is tested against the real filesystem in
+// __tests__/utils/marker-file.spec.ts.
+jest.mock('../../src/utils/marker-file', () => ({
+  DOCKER_ASSET_MAX_BYTES: 1024 * 1024,
+  UnsafeFileError: class UnsafeFileError extends Error {},
+  snapshotDockerfile: jest.fn(),
 }))
 
 import * as fs from 'fs'
@@ -357,6 +371,72 @@ describe('docker-utils', () => {
         { stdio: 'inherit' },
       )
       expect(logger.success).toHaveBeenCalled()
+    })
+
+    describe('~/.ai-support-agent/Dockerfile (design §7.7)', () => {
+      const markerFile = jest.requireMock('../../src/utils/marker-file') as {
+        UnsafeFileError: new (message: string) => Error
+        snapshotDockerfile: jest.Mock
+      }
+      const { resolveDockerfile } = jest.requireMock('../../src/docker/dockerfile-path') as { resolveDockerfile: jest.Mock }
+
+      beforeEach(() => {
+        resolveDockerfile.mockReturnValueOnce({ dockerfilePath: '/config/Dockerfile', contextDir: '/config', fromConfigDir: true })
+      })
+
+      it('builds from a no-follow snapshot (context unchanged) and removes it afterwards', () => {
+        const cleanup = jest.fn()
+        markerFile.snapshotDockerfile.mockReturnValueOnce({ path: '/private/snap/Dockerfile', cleanup })
+        mockExecFileSync.mockReturnValue(Buffer.from(''))
+
+        buildImage('1.2.3')
+
+        expect(markerFile.snapshotDockerfile).toHaveBeenCalledWith('/config/Dockerfile', 1024 * 1024, '/config/.build-snapshots')
+        const args = mockExecFileSync.mock.calls[0][1] as string[]
+        expect(args.slice(-3)).toEqual(['-f', '/private/snap/Dockerfile', '/config'])
+        expect(cleanup).toHaveBeenCalledTimes(1)
+      })
+
+      it('removes the snapshot when the build fails', () => {
+        const cleanup = jest.fn()
+        markerFile.snapshotDockerfile.mockReturnValueOnce({ path: '/private/snap/Dockerfile', cleanup })
+        mockExecFileSync.mockImplementationOnce(() => {
+          throw new Error('build failed')
+        })
+
+        expect(() => buildImage('1.2.3')).toThrow('build failed')
+        expect(cleanup).toHaveBeenCalledTimes(1)
+      })
+
+      it('refuses a symlink (or other non-regular file), passing the reason on, and runs no build', () => {
+        markerFile.snapshotDockerfile.mockImplementationOnce(() => {
+          throw new markerFile.UnsafeFileError('Refusing to read a non-regular file: /config/Dockerfile')
+        })
+
+        expect(() => buildImage('1.2.3')).toThrow('docker.configDockerfileRefused')
+        // The actual reason (symlink, too large, swapped, ...) is passed on.
+        expect(t).toHaveBeenCalledWith('docker.configDockerfileRefused', {
+          path: '/config/Dockerfile',
+          reason: 'Refusing to read a non-regular file: /config/Dockerfile',
+        })
+        expect(mockExecFileSync).not.toHaveBeenCalled()
+      })
+
+      it('passes other errors through unchanged', () => {
+        markerFile.snapshotDockerfile.mockImplementationOnce(() => {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+        })
+
+        expect(() => buildImage('1.2.3')).toThrow('EACCES')
+        expect(mockExecFileSync).not.toHaveBeenCalled()
+      })
+
+      it('fails when the file vanished after it was resolved (no fallback to the bundle)', () => {
+        markerFile.snapshotDockerfile.mockReturnValueOnce(undefined)
+
+        expect(() => buildImage('1.2.3')).toThrow('Dockerfile not found: /config/Dockerfile')
+        expect(mockExecFileSync).not.toHaveBeenCalled()
+      })
     })
 
     it('uses the provided custom Dockerfile path and logs that it is in use', () => {

@@ -191,10 +191,12 @@ describe('config-writer', () => {
         undefined,
         undefined,
         9222,
+        'fixture-browser-token',
       )
 
       const content = JSON.parse(readFileSync(configPath, 'utf-8'))
       expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_BROWSER_LOCAL_PORT).toBe('9222')
+      expect(content.mcpServers['ai-support-agent'].env.AI_SUPPORT_BROWSER_LOCAL_TOKEN).toBe('fixture-browser-token')
     })
 
     it('should not include browserLocalPort env var when not provided', () => {
@@ -329,6 +331,14 @@ describe('config-writer', () => {
   })
 
   describe('writeCommandMcpConfig', () => {
+    it('replaces stale browser credentials in a per-command child config', () => {
+      const base = writeMcpConfig(testDir, 'http://localhost:3030', 'token', 'TEST_01', '/server.js', undefined, undefined, 1111, 'old-token')
+      const configPath = writeCommandMcpConfig(base, 'command', 'conversation', undefined, undefined, undefined, { port: 2222, token: 'new-token' })
+      const env = JSON.parse(readFileSync(configPath, 'utf-8')).mcpServers['ai-support-agent'].env
+      expect(env.AI_SUPPORT_BROWSER_LOCAL_PORT).toBe('2222')
+      expect(env.AI_SUPPORT_BROWSER_LOCAL_TOKEN).toBe('new-token')
+    })
+
     it('should write a command-scoped config file embedding AI_SUPPORT_CONVERSATION_ID', () => {
       const baseConfigPath = writeMcpConfig(
         testDir,

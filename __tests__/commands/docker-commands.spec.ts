@@ -17,6 +17,18 @@ jest.mock('../../src/docker/docker-runner', () => ({
   hasUnmanagedConfigDockerfile: jest.fn(() => false),
 }))
 
+// The no-follow helpers are tested against the real filesystem in
+// __tests__/utils/marker-file.spec.ts; here they forward to the mocked fs.
+jest.mock('../../src/utils/marker-file', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fsMock = require('fs') as typeof import('fs')
+  return {
+    DOCKER_ASSET_MAX_BYTES: 1024 * 1024,
+    pathExistsNoFollow: jest.fn((p: string) => fsMock.existsSync(p)),
+    readRegularFileNoFollow: jest.fn((p: string) => Buffer.from(String(fsMock.readFileSync(p, 'utf-8')))),
+  }
+})
+
 // Mock constants
 jest.mock('../../src/constants', () => ({
   AGENT_VERSION: '1.0.0',
@@ -36,6 +48,9 @@ import {
   syncDockerfileToConfigDir,
 } from '../../src/docker/docker-runner'
 import type { AgentConfig } from '../../src/types'
+import { readRegularFileNoFollow } from '../../src/utils/marker-file'
+
+const mockReadRegularFileNoFollow = readRegularFileNoFollow as jest.MockedFunction<typeof readRegularFileNoFollow>
 
 const mockBuildImage = buildImage as jest.MockedFunction<typeof buildImage>
 const mockEnsureImage = ensureImage as jest.MockedFunction<typeof ensureImage>
@@ -62,6 +77,73 @@ describe('commands/docker-commands', () => {
     mockGetConfigDockerfilePath.mockReturnValue('/config/Dockerfile')
     mockLoadConfig.mockReturnValue(null)
     mockHasUnmanagedDockerfile.mockReturnValue(false)
+    process.exitCode = undefined
+  })
+
+  afterEach(() => {
+    process.exitCode = undefined
+  })
+
+  describe('config-dir Dockerfile that is not a regular file (design §7.7)', () => {
+    // buildImage() itself refuses it (tested in docker-utils.spec.ts); the
+    // commands only have to surface that failure.
+    it('docker-build reports buildImage refusing it, and fails', async () => {
+      mockBuildImage.mockImplementationOnce(() => {
+        throw new Error('docker.configDockerfileNotRegular')
+      })
+      await program.parseAsync(['node', 'test', 'docker-build'])
+      expect(logger.error).toHaveBeenCalledWith('docker.configDockerfileNotRegular')
+      expect(logger.success).not.toHaveBeenCalled()
+      expect(process.exitCode).toBe(1)
+    })
+
+    it('docker-ensure-image reports a failed local build, and fails', async () => {
+      mockEnsureImage.mockImplementationOnce(() => {
+        throw new Error('docker.configDockerfileNotRegular')
+      })
+      await program.parseAsync(['node', 'test', 'docker-ensure-image'])
+      expect(logger.error).toHaveBeenCalledWith('docker.configDockerfileNotRegular')
+      expect(process.exitCode).toBe(1)
+    })
+
+    it('docker-diff-dockerfile reports an lstat error on the config-dir copy instead of throwing', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const markerFile = require('../../src/utils/marker-file') as { pathExistsNoFollow: jest.Mock }
+      markerFile.pathExistsNoFollow.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+      })
+
+      program.parse(['node', 'test', 'docker-diff-dockerfile'])
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('docker.diffTargetUnreadable'))
+      expect(mockComputeUnifiedDiff).not.toHaveBeenCalled()
+      expect(process.exitCode).toBe(1)
+    })
+
+    it('docker-diff-dockerfile reads the config-dir copy without following a symlink', () => {
+      mockExistsSync.mockImplementation((p) => p === '/config/Dockerfile')
+      mockReadFileSync.mockReturnValue('bundled' as never)
+      mockReadRegularFileNoFollow.mockImplementationOnce(() => {
+        throw new Error('Refusing to read a non-regular file: /config/Dockerfile')
+      })
+
+      program.parse(['node', 'test', 'docker-diff-dockerfile'])
+
+      expect(mockReadRegularFileNoFollow).toHaveBeenCalledWith('/config/Dockerfile', 1024 * 1024)
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('docker.diffTargetUnreadable'))
+      expect(mockComputeUnifiedDiff).not.toHaveBeenCalled()
+      expect(process.exitCode).toBe(1)
+    })
+
+    it('docker-diff-dockerfile reports a config-dir copy that vanished as not found', () => {
+      mockExistsSync.mockImplementation((p) => p === '/config/Dockerfile')
+      mockReadFileSync.mockReturnValue('bundled' as never)
+      mockReadRegularFileNoFollow.mockReturnValueOnce(undefined)
+
+      program.parse(['node', 'test', 'docker-diff-dockerfile'])
+
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('docker.diffTargetNotFound'))
+    })
   })
 
   describe('registerDockerCommands', () => {

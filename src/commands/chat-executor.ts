@@ -109,6 +109,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
     mcpConfigPath,
     tenantCode,
     browserLocalPort,
+    browserLocalToken,
   } = options
 
   if (!agentId) {
@@ -148,7 +149,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
       case 'api':
         return executeApiChatCommand(payload, commandId, client, serverConfig, agentId, { projectDir, tenantCode })
       case 'codex': {
-        const result = await executeCliChat('codex', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate, options.onChildProcess)
+        const result = await executeCliChat('codex', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, browserLocalToken, hasFallbackCandidate, options.onChildProcess)
         if (result.success || !isRuntimeUnavailable('codex', result) || !hasFallbackCandidate) return result
         const fallbackError = String(result.error ?? '')
         logger.warn(`[chat] codex unavailable, falling back to ${modes[i + 1]}: ${fallbackError}`)
@@ -157,7 +158,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
       }
       case 'claude_code':
       default: {
-        const result = await executeCliChat('claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, hasFallbackCandidate, options.onChildProcess)
+        const result = await executeCliChat('claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, browserLocalToken, hasFallbackCandidate, options.onChildProcess)
         if (result.success || !isRuntimeUnavailable('claude_code', result) || !hasFallbackCandidate) return result
         const fallbackError = String(result.error ?? '')
         logger.warn(`[chat] claude_code unavailable, falling back to ${modes[i + 1]}: ${fallbackError}`)
@@ -167,7 +168,7 @@ export async function executeChatCommand(options: ExecuteChatCommandOptions): Pr
     }
   }
 
-  return lastResult ?? executeCliChat(mode === 'codex' ? 'codex' : 'claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, false, options.onChildProcess)
+  return lastResult ?? executeCliChat(mode === 'codex' ? 'codex' : 'claude_code', payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, browserLocalToken, false, options.onChildProcess)
 }
 
 function resolveSlackMarketplaceModes(
@@ -256,6 +257,7 @@ async function executeCliChat(
   mcpConfigPath?: string,
   tenantCode?: string,
   browserLocalPort?: number,
+  browserLocalToken?: string,
   suppressRuntimeUnavailableError = false,
   onChildProcess?: (child: import('child_process').ChildProcess) => void,
 ): Promise<CommandResult> {
@@ -268,7 +270,7 @@ async function executeCliChat(
     }
 
     const result = await executeCliChatOnce(
-      mode, payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, suppressRuntimeUnavailableError, onChildProcess,
+      mode, payload, commandId, client, agentId, serverConfig, projectDir, projectConfig, mcpConfigPath, tenantCode, browserLocalPort, browserLocalToken, suppressRuntimeUnavailableError, onChildProcess,
     )
 
     if (result.success) return result
@@ -311,6 +313,7 @@ async function executeCliChatOnce(
   mcpConfigPath?: string,
   tenantCode?: string,
   browserLocalPort?: number,
+  browserLocalToken?: string,
   suppressRuntimeUnavailableError = false,
   onChildProcess?: (child: import('child_process').ChildProcess) => void,
 ): Promise<CommandResult> {
@@ -426,7 +429,7 @@ async function executeCliChatOnce(
     // 埋め込んだ専用の設定ファイルを都度書き出し、これを `--mcp-config` に使う
     // （`config-writer.ts` の `CONVERSATION_ID_ENV` 定義コメントも参照）。
     let commandMcpConfigPath: string | undefined
-    if (!slackMarketplaceCommand && mcpConfigPath && conversationId) {
+    if (!slackMarketplaceCommand && mcpConfigPath && (conversationId || (browserLocalPort && browserLocalToken))) {
       try {
         // 指名（instanceId ＋ 世代）も渡す。MCP サーバーは子プロセスで、この env に
         // 挙げたキーしか受け取らないため、渡さないと update_system_knowledge が
@@ -435,12 +438,13 @@ async function executeCliChatOnce(
         commandMcpConfigPath = writeCommandMcpConfig(
           mcpConfigPath,
           commandId,
-          conversationId,
+          conversationId ?? '',
           taskIdStr,
           agentId,
           assignmentGeneration === undefined
             ? undefined
             : { instanceId: client.getInstanceId(), generation: assignmentGeneration },
+          browserLocalPort && browserLocalToken ? { port: browserLocalPort, token: browserLocalToken } : undefined,
         )
         cleanupCommandMcpConfig = (): void => {
           try {
@@ -527,6 +531,7 @@ async function executeCliChatOnce(
         conversationId: conversationIdStr,
         browserSessionId: parseString(payload.browserSessionId) ?? undefined,
         browserLocalPort,
+        browserLocalToken,
         taskId: taskIdStr,
         ...(payload.policyContext?.e2eExecutionId && {
           e2eExecutionId: payload.policyContext.e2eExecutionId,

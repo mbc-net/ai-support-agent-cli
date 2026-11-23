@@ -79,6 +79,13 @@ function expectRejected(raw: unknown, pattern: RegExp): void {
 }
 
 describe('RDP_TUNNEL_KINDS', () => {
+  it('preserves an SSH host-key pin for the dialer', () => {
+    const fingerprint = 'SHA256:' + 'A'.repeat(43)
+    const parsed = parseRdpTunnel(ssh({}, { hostKeyFingerprint: fingerprint }))
+    expect(parsed.kind).toBe('ssh')
+    expect((parsed as { via: { hostKeyFingerprint: string } }).via.hostKeyFingerprint).toBe(fingerprint)
+  })
+
   it('★ 契約の 3 値（api の RDP_TUNNEL_KINDS と同じ）', () => {
     expect([...RDP_TUNNEL_KINDS]).toEqual(['ssh', 'ssm', 'tailscale'])
   })

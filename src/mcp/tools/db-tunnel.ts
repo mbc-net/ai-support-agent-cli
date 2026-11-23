@@ -1,3 +1,4 @@
+import { createSshHostVerifier } from '../../utils/ssh-host-key'
 /**
  * Plain-SSH local port forward used by the `db_query` / `get_db_schemas` MCP
  * tools when a DB connection is configured to be reached through a bastion
@@ -75,6 +76,8 @@ export async function connectSshClient(
     throw new Error(unsupportedSshAuthTypeMessage(ssh.authType))
   }
 
+  const hostVerifier = createSshHostVerifier(ssh.hostKeyFingerprint)
+
   const { Client } = await import('ssh2')
 
   return new Promise<ConnectedSshClient>((resolve, reject) => {
@@ -97,6 +100,7 @@ export async function connectSshClient(
     client.once('error', onConnectError)
 
     const connectConfig: Record<string, unknown> = {
+      hostVerifier,
       host: ssh.hostname,
       port: ssh.port || DEFAULT_SSH_PORT,
       username: ssh.username,

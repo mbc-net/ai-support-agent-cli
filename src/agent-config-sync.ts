@@ -45,6 +45,7 @@ export interface ConfigSyncDeps {
   projectCode: string
   localAgentChatMode: AgentChatMode | undefined
   browserLocalPort?: number
+  browserLocalToken?: string
   /**
    * Called when Docker customization changes (Docker mode only).
    *
@@ -308,6 +309,7 @@ export async function applyProjectConfig(
         backlogConfigs,
         undefined,
         deps.browserLocalPort,
+        deps.browserLocalToken,
       )
       logger.info(`${deps.prefix} MCP config written: ${state.mcpConfigPath}`)
 

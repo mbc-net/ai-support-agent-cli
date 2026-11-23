@@ -124,6 +124,7 @@ export async function openSshRdpDialer(
       username: via.username,
       authType: via.authType,
       privateKey: via.credential,
+      hostKeyFingerprint: via.hostKeyFingerprint,
     },
     '[rdp-tunnel]',
   )
