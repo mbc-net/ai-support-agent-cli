@@ -14,8 +14,10 @@ const mockLogger = {
 jest.mock('../../src/logger', () => ({ logger: mockLogger }))
 
 const mockExecuteSshCommand = jest.fn()
+const mockExecuteSshCommandStreaming = jest.fn()
 jest.mock('../../src/commands/ssh-executor', () => ({
   executeSshCommand: (...args: unknown[]) => mockExecuteSshCommand(...args),
+  executeSshCommandStreaming: (...args: unknown[]) => mockExecuteSshCommandStreaming(...args),
 }))
 
 const mockValidateCommand = jest.fn()
@@ -476,6 +478,255 @@ describe('readonly_diagnostic dispatch', () => {
     expect(logged).not.toContain('SENSITIVE-OUTPUT-LINE')
   })
 
+  describe('log patterns: log_list / rotated files / .gz tail / log_grep', () => {
+    const PATTERN = '/var/log/app/release_error.log*'
+    const listLine = (name: string) => `  12 8 -rw-r----- 1 app adm 4096 Nov 22 10:00 /var/log/app/${name}`
+
+    /** Stream `lines` to the onLine callback and resolve with `result`. */
+    function streamReturns(lines: string[], result: { exitCode: number | null; stderr?: string; truncated?: boolean }): void {
+      mockExecuteSshCommandStreaming.mockImplementation(
+        async (_cred: unknown, _command: string, _timeout: number, options: { onLine: (l: string) => void }) => {
+          for (const l of lines) options.onLine(l)
+          return { exitCode: result.exitCode, stderr: result.stderr ?? '', truncated: result.truncated ?? false }
+        },
+      )
+    }
+
+    it('log_list checks the directory with readlink -e and filters secret names from the output', async () => {
+      sshReturns([listLine('release_error.log'), listLine('release_error.log.pem'), listLine('release_error.log.1.gz'), ''].join('\n'))
+      const command = "find /var/log/app -maxdepth 1 -type f -name 'release_error.log*' -ls"
+      const result = await run(payload({
+        catalogId: 'log_list',
+        params: { pattern: PATTERN },
+        expectedCommand: command,
+        allowedLogPaths: [PATTERN],
+      }))
+      expect(mockExecuteSshCommand.mock.calls).toEqual([
+        [CREDENTIAL, 'readlink -e -- /var/log/app', 25],
+        [CREDENTIAL, command, 25],
+      ])
+      expect(mockValidateCommand.mock.calls.map((c) => c[0])).toEqual([command, 'readlink -e -- /var/log/app'])
+      expect(result).toEqual({
+        success: true,
+        data: {
+          command,
+          output: [listLine('release_error.log'), listLine('release_error.log.1.gz'), ''].join('\n'),
+          truncated: false,
+        },
+      })
+    })
+
+    it.each<[string, string]>([
+      ['a symlinked directory', '/data/app\n'],
+      ['a missing directory', 'Exit code: 1\nSTDOUT:\n'],
+    ])('log_list rejects %s without listing', async (_label, resolved) => {
+      mockExecuteSshCommand.mockImplementation(async (_cred: unknown, command: string) =>
+        command.startsWith('readlink ') ? resolved : 'SHOULD-NOT-RUN',
+      )
+      const result = await run(payload({
+        catalogId: 'log_list',
+        params: { pattern: PATTERN },
+        expectedCommand: "find /var/log/app -maxdepth 1 -type f -name 'release_error.log*' -ls",
+        allowedLogPaths: [PATTERN],
+      }))
+      expect(result).toEqual({
+        success: false,
+        error: 'readonly_diagnostic rejected: log directory is not a plain directory under the allowlist (symlink or missing)',
+      })
+      expect(mockExecuteSshCommand).toHaveBeenCalledTimes(1)
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        '[readonly_diagnostic] rejected commandId=cmd-1 catalogId=log_list reason=log_dir_not_plain',
+      )
+    })
+
+    it('log_list rejects an unquoted expectedCommand', async () => {
+      const result = await run(payload({
+        catalogId: 'log_list',
+        params: { pattern: PATTERN },
+        expectedCommand: 'find /var/log/app -maxdepth 1 -type f -name release_error.log* -ls',
+        allowedLogPaths: [PATTERN],
+      }))
+      expect(result).toEqual({ success: false, error: 'readonly_diagnostic rejected: command mismatch' })
+      expect(mockGetCredential).not.toHaveBeenCalled()
+    })
+
+    it('log_tail reads a rotated .1 file after the preflight on that concrete file', async () => {
+      const path = '/var/log/app/release_error.log.1'
+      const result = await run(payload({
+        params: { path, lines: 50 },
+        expectedCommand: `tail -n 50 -- ${path}`,
+        allowedLogPaths: [PATTERN],
+      }))
+      expect(mockExecuteSshCommand.mock.calls).toEqual([
+        [CREDENTIAL, `readlink -e -- ${path}`, 25],
+        [CREDENTIAL, `test -f ${path}`, 25],
+        [CREDENTIAL, `tail -n 50 -- ${path}`, 25],
+      ])
+      expect(result.success).toBe(true)
+    })
+
+    it('log_tail rejects a file the pattern does not match', async () => {
+      const result = await run(payload({
+        params: { path: '/var/log/app/other.log', lines: 50 },
+        expectedCommand: 'tail -n 50 -- /var/log/app/other.log',
+        allowedLogPaths: [PATTERN],
+      }))
+      expect(result).toEqual({ success: false, error: 'readonly_diagnostic rejected: invalid catalog request' })
+      expect(mockGetCredential).not.toHaveBeenCalled()
+    })
+
+    describe('.gz tail', () => {
+      const GZ = '/var/log/app/release_error.log.2.gz'
+      const gzPayload = () => payload({
+        params: { path: GZ, lines: 3 },
+        expectedCommand: `gzip -dc -- ${GZ}`,
+        allowedLogPaths: [PATTERN],
+      })
+
+      it('streams gzip -dc after the preflight and keeps only the last N lines', async () => {
+        streamReturns(['l1', 'l2', 'l3', 'l4', 'l5'], { exitCode: 0 })
+        const result = await run(gzPayload())
+        expect(mockExecuteSshCommand.mock.calls).toEqual([
+          [CREDENTIAL, `readlink -e -- ${GZ}`, 25],
+          [CREDENTIAL, `test -f ${GZ}`, 25],
+        ])
+        expect(mockExecuteSshCommandStreaming).toHaveBeenCalledTimes(1)
+        const [cred, command, timeout, options] = mockExecuteSshCommandStreaming.mock.calls[0]
+        expect([cred, command, timeout]).toEqual([CREDENTIAL, `gzip -dc -- ${GZ}`, 25])
+        expect(options).toEqual({ onLine: expect.any(Function), maxBytes: 256 * 1024 * 1024 })
+        expect(result).toEqual({
+          success: true,
+          data: { command: `gzip -dc -- ${GZ}`, output: 'l3\nl4\nl5\n', truncated: false },
+        })
+      })
+
+      it('marks truncated when the 256 MiB cap stopped the stream and returns the last lines seen', async () => {
+        streamReturns(['l1', 'l2'], { exitCode: null, truncated: true })
+        const result = await run(gzPayload())
+        expect(result).toEqual({
+          success: true,
+          data: { command: `gzip -dc -- ${GZ}`, output: 'l1\nl2\n', truncated: true },
+        })
+      })
+
+      it('reports a non-zero exit like the plain executor does', async () => {
+        streamReturns(['l1'], { exitCode: 1, stderr: 'gzip: unexpected end of file\n' })
+        const result = await run(gzPayload())
+        expect(result).toEqual({
+          success: true,
+          data: {
+            command: `gzip -dc -- ${GZ}`,
+            output: 'Exit code: 1\nSTDOUT:\nl1\n\nSTDERR:\ngzip: unexpected end of file\n',
+            truncated: false,
+          },
+        })
+      })
+
+      it('rejects a symlinked .gz file without reading it', async () => {
+        mockExecuteSshCommand.mockImplementation(async (_cred: unknown, command: string) =>
+          command.startsWith('readlink ') ? '/etc/shadow\n' : '',
+        )
+        const result = await run(gzPayload())
+        expect(result.success).toBe(false)
+        expect(mockExecuteSshCommandStreaming).not.toHaveBeenCalled()
+      })
+
+      it('passes the pinned host-key algorithms to the streaming executor', async () => {
+        streamReturns([], { exitCode: 0 })
+        const result = await run(gzPayload())
+        expect(result.success).toBe(true)
+        // The default CREDENTIAL carries its own fingerprint, so no algorithms are restricted.
+        expect(mockExecuteSshCommandStreaming.mock.calls[0][3].hostKeyAlgorithms).toBeUndefined()
+      })
+
+      it('shares the timeout budget with the preflight', async () => {
+        const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000)
+        try {
+          mockExecuteSshCommand.mockImplementation(async (_cred: unknown, command: string) => {
+            if (command.startsWith('readlink ')) return `${GZ}\n`
+            now.mockReturnValue(1_010_000)
+            return ''
+          })
+          streamReturns([], { exitCode: 0 })
+          await run(gzPayload())
+          expect(mockExecuteSshCommandStreaming.mock.calls[0][2]).toBe(15)
+        } finally {
+          now.mockRestore()
+        }
+      })
+    })
+
+    describe('log_grep', () => {
+      const grepPayload = (path: string, text: string, lines = 2, expectedCommand?: string) => payload({
+        catalogId: 'log_grep',
+        params: { path, text, lines },
+        expectedCommand: expectedCommand ?? `${path.endsWith('.gz') ? 'zgrep' : 'grep'} -F -n -e '${text}' -- ${path}`,
+        allowedLogPaths: [PATTERN],
+      })
+
+      it('keeps the last N matching lines', async () => {
+        streamReturns(['1:a x', '5:a y', '9:a z'], { exitCode: 0 })
+        const result = await run(grepPayload('/var/log/app/release_error.log', 'a x'))
+        expect(mockExecuteSshCommand.mock.calls.map((c) => c[1])).toEqual([
+          'readlink -e -- /var/log/app/release_error.log',
+          'test -f /var/log/app/release_error.log',
+        ])
+        expect(mockExecuteSshCommandStreaming.mock.calls[0][1]).toBe("grep -F -n -e 'a x' -- /var/log/app/release_error.log")
+        expect(result).toEqual({
+          success: true,
+          data: { command: "grep -F -n -e 'a x' -- /var/log/app/release_error.log", output: '5:a y\n9:a z\n', truncated: false },
+        })
+      })
+
+      it('uses zgrep for .gz files', async () => {
+        streamReturns(['3:boom'], { exitCode: 0 })
+        const path = '/var/log/app/release_error.log.4.gz'
+        const result = await run(grepPayload(path, 'boom', 2, `zgrep -F -n -e boom -- ${path}`))
+        expect(result).toEqual({
+          success: true,
+          data: { command: `zgrep -F -n -e boom -- ${path}`, output: '3:boom\n', truncated: false },
+        })
+      })
+
+      it('treats exit code 1 (no match) as success with empty output', async () => {
+        streamReturns([], { exitCode: 1 })
+        const result = await run(grepPayload('/var/log/app/release_error.log', 'a x'))
+        expect(result).toEqual({
+          success: true,
+          data: { command: "grep -F -n -e 'a x' -- /var/log/app/release_error.log", output: '', truncated: false },
+        })
+      })
+
+      it('reports exit code 2 (error) with stderr', async () => {
+        streamReturns([], { exitCode: 2, stderr: 'grep: read error\n' })
+        const result = await run(grepPayload('/var/log/app/release_error.log', 'a x'))
+        expect((result as { data: { output: string } }).data.output).toBe('Exit code: 2\nSTDOUT:\n\nSTDERR:\ngrep: read error\n')
+      })
+
+      it('marks truncated when the stream cap was hit', async () => {
+        streamReturns(['1:a'], { exitCode: null, truncated: true })
+        const result = await run(grepPayload('/var/log/app/release_error.log', 'a x'))
+        expect((result as { data: { truncated: boolean } }).data.truncated).toBe(true)
+      })
+
+      it('rejects a search text the command blocklist refuses, before fetching the credential', async () => {
+        const result = await run(grepPayload('/var/log/app/release_error.log', 'sudo', 2, 'grep -F -n -e sudo -- /var/log/app/release_error.log'))
+        expect(result).toEqual({
+          success: false,
+          error: 'readonly_diagnostic rejected: Command blocked: contains a prohibited pattern',
+        })
+        expect(mockGetCredential).not.toHaveBeenCalled()
+      })
+
+      it('never logs the matched lines', async () => {
+        streamReturns(['1:SENSITIVE-MATCH'], { exitCode: 0 })
+        await run(grepPayload('/var/log/app/release_error.log', 'a x'))
+        const logged = JSON.stringify(Object.values(mockLogger).map((fn) => fn.mock.calls))
+        expect(logged).not.toContain('SENSITIVE-MATCH')
+      })
+    })
+  })
+
   describe('host key pin', () => {
     const ASSET_UID = '01M7WSFAK2W2V29AX1T7KMPG2F'
     const NOT_PINNED = 'readonly_diagnostic rejected: host key is not pinned for this asset; run a server setup recipe against it first'
@@ -564,6 +815,28 @@ describe('readonly_diagnostic dispatch', () => {
         expect(call[0]).toEqual({ ...LEDGER_CREDENTIAL, hostKeyFingerprint: fingerprintOf(blob) })
         expect(call[3]).toEqual({ hostKeyAlgorithms: ['ssh-ed25519'] })
       }
+    })
+
+    it('uses the pinned key for the preflight and the streaming read of a .gz tail', async () => {
+      const blob = ed25519Blob()
+      writePins([line('db1.internal', blob)])
+      const gz = '/var/log/app/release_error.log.1.gz'
+      mockExecuteSshCommandStreaming.mockResolvedValue({ exitCode: 0, stderr: '', truncated: false })
+      const result = await run(payload({
+        assetUid: ASSET_UID,
+        params: { path: gz, lines: 10 },
+        expectedCommand: `gzip -dc -- ${gz}`,
+        allowedLogPaths: ['/var/log/app/release_error.log*'],
+      }))
+      expect(result.success).toBe(true)
+      const pinned = { ...LEDGER_CREDENTIAL, hostKeyFingerprint: fingerprintOf(blob) }
+      expect(mockExecuteSshCommand.mock.calls.map((c) => [c[0], c[3]])).toEqual([
+        [pinned, { hostKeyAlgorithms: ['ssh-ed25519'] }],
+        [pinned, { hostKeyAlgorithms: ['ssh-ed25519'] }],
+      ])
+      const [cred, , , options] = mockExecuteSshCommandStreaming.mock.calls[0]
+      expect(cred).toEqual(pinned)
+      expect(options.hostKeyAlgorithms).toEqual(['ssh-ed25519'])
     })
 
     it('matches a hashed [host]:port entry for a non-22 port', async () => {
