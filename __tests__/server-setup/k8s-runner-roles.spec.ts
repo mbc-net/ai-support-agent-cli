@@ -22,6 +22,8 @@ import { DEFAULT_SCHEMA, load } from 'js-yaml'
  *   7. kubectl / kubeconfig の存在を assert する
  *   8. Kubernetes オブジェクト名を DNS-1123 ラベルとして assert する
  *   9. 秘匿値が `environment:` にも生成マニフェストにも載らない
+ *  10. gitlab_runner_k8s のオプトイン設定（pull_policy / requests・limits / S3 キャッシュ）は
+ *      既定では何も出力せず、値は anchored regex で検証してから TOML へ展開する
  */
 const ROLE_NAMES = ['gitlab_runner_k8s', 'github_runner_k8s'] as const
 type RoleName = (typeof ROLE_NAMES)[number]
@@ -160,7 +162,7 @@ describe('Kubernetes CI runner bundled roles (gitlab_runner_k8s / github_runner_
         .filter((s): s is string => !!s)
       for (const script of scripts) {
         for (const expression of script.match(/\{\{[^}]*\}\}/g) ?? []) {
-          expect(expression).not.toMatch(/_(token|pat)\b/)
+          expect(expression).not.toMatch(/_(token|pat)\b|_s3_(access|secret)_key\b/)
         }
       }
     },
@@ -391,7 +393,7 @@ describe('Kubernetes CI runner bundled roles (gitlab_runner_k8s / github_runner_
   it.each(ROLE_NAMES)(
     '%s は生成する HelmChart マニフェストに秘匿値を書かず、既存 Secret を名前で参照する',
     (role) => {
-      const secretVarPattern = /_(token|pat)\b/
+      const secretVarPattern = /_(token|pat)\b|_s3_(access|secret)_key\b/
       const manifests = parseTasks(role)
         .map(copyContent)
         .filter((c): c is string => !!c)
@@ -423,7 +425,10 @@ describe('Kubernetes CI runner bundled roles (gitlab_runner_k8s / github_runner_
     const scripts = parseTasks('gitlab_runner_k8s')
       .map((task) => stringArg(task, 'shell'))
       .filter((s): s is string => !!s)
-    const secretScripts = scripts.filter((s) => s.includes('create secret'))
+    // S3 キャッシュのクレデンシャル Secret（accesskey / secretkey）は別物なので除く。
+    const secretScripts = scripts.filter((s) =>
+      s.includes('create secret generic {{ gitlab_runner_k8s_secret_name }}'),
+    )
     expect(secretScripts.length).toBeGreaterThan(0)
     for (const script of secretScripts) {
       expect(script).toContain('--from-file=runner-token=')
@@ -448,5 +453,367 @@ describe('Kubernetes CI runner bundled roles (gitlab_runner_k8s / github_runner_
     const scaleSetApplyIndex = names.findIndex((n) => n.includes('scale set'))
     expect(crdWaitIndex).toBeGreaterThanOrEqual(0)
     expect(scaleSetApplyIndex).toBeGreaterThan(crdWaitIndex)
+  })
+})
+
+/**
+ * gitlab_runner_k8s のオプトイン設定（イメージ取得ポリシー / ジョブの requests・limits /
+ * S3 共有キャッシュ）。
+ *
+ * 実クラスタ・Ansible 無しで固定できる不変条件:
+ *   - 既定値（空）では TOML にも HelmChart の values にも1行も出力しない（既存の導入で
+ *     生成マニフェストがバイト単位で変わらず、Deployment が再起動しない）
+ *   - 各オプションは対応する `{% if %}` の内側でだけ出力される
+ *   - TOML へ展開する値は anchored regex の assert を通る（生 TOML の注入を防ぐ）
+ *   - S3 のクレデンシャルはマニフェストへ展開されず、Secret 名の参照だけが載る
+ */
+describe('gitlab_runner_k8s のオプトイン設定（pull_policy / requests・limits / S3 キャッシュ）', () => {
+  const ROLE = 'gitlab_runner_k8s' as const
+
+  const manifest = (): string =>
+    parseTasks(ROLE)
+      .map(copyContent)
+      .filter((c): c is string => !!c)
+      .find((c) => c.includes('kind: HelmChart'))!
+
+  /** 列0の `{% if COND %}` … `{% endif %}`（入れ子対応）を、COND が pattern に一致するものだけ取り除く。 */
+  const stripIfBlocks = (content: string, pattern: RegExp): string => {
+    const out: string[] = []
+    let skipDepth = 0
+    for (const line of content.split('\n')) {
+      const ifMatch = /^\{%\s*if\s+(.*?)\s*%\}$/.exec(line)
+      const isEndif = /^\{%\s*endif\s*%\}$/.test(line)
+      if (skipDepth > 0) {
+        if (ifMatch) skipDepth++
+        if (isEndif) skipDepth--
+        continue
+      }
+      if (ifMatch && pattern.test(ifMatch[1])) {
+        skipDepth = 1
+        continue
+      }
+      out.push(line)
+    }
+    return out.join('\n')
+  }
+
+  /** `{% if COND %}` の直後から対応する `{% endif %}` までの本文（入れ子の if 行も含む）。 */
+  const ifBlockBody = (content: string, condition: RegExp): string[] => {
+    const lines = content.split('\n')
+    const start = lines.findIndex((l) => {
+      const m = /^\{%\s*if\s+(.*?)\s*%\}$/.exec(l)
+      return !!m && condition.test(m[1])
+    })
+    expect(start).toBeGreaterThanOrEqual(0)
+    const body: string[] = []
+    let depth = 1
+    for (const line of lines.slice(start + 1)) {
+      if (/^\{%\s*if\s/.test(line)) depth++
+      if (/^\{%\s*endif\s*%\}$/.test(line)) depth--
+      if (depth === 0) break
+      body.push(line)
+    }
+    return body
+  }
+
+  const OPT_IN_CONDITION =
+    /gitlab_runner_k8s_(pull_policy|cpu_request|cpu_limit|memory_request|memory_limit|cache_type)/
+
+  /** 変更前（オプトイン設定の導入前）の `runners:` 以降。既定ではこれと完全一致すること。 */
+  const RUNNERS_SECTION_BEFORE_OPT_IN = [
+    '    runners:',
+    '      secret: {{ gitlab_runner_k8s_secret_name | to_json }}',
+    '{% if gitlab_runner_k8s_has_reg | bool %}',
+    '      tags: {{ gitlab_runner_k8s_tags | to_json }}',
+    '      runUntagged: {{ (gitlab_runner_k8s_run_untagged | bool) | to_json }}',
+    '      locked: {{ (gitlab_runner_k8s_locked | bool) | to_json }}',
+    '{% endif %}',
+    '      config: |',
+    '        [[runners]]',
+    '          [runners.kubernetes]',
+    '            namespace = {{ gitlab_runner_k8s_namespace | to_json }}',
+    '            image = {{ gitlab_runner_k8s_job_image | to_json }}',
+    '            privileged = false',
+    '            automount_service_account_token = false',
+    '',
+  ].join('\n')
+
+  /** assert の that から `<var> is match('<regex>')` を抜き出して JS の RegExp にする。 */
+  const assertRegexFor = (varName: string): RegExp => {
+    const asserts = parseTasks(ROLE)
+      .map((task) => moduleArgs(task, 'assert'))
+      .filter((a): a is { that: unknown } => typeof a === 'object' && a !== null)
+    const thatText = asserts.flatMap((a) => (Array.isArray(a.that) ? a.that.map(String) : []))
+    const escaped = varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    for (const expr of thatText) {
+      const m = new RegExp(
+        `${escaped}(?:\\s*\\|\\s*string\\s*\\))?\\s+is\\s+match\\('(\\^[^']*\\$)'\\)`,
+      ).exec(expr)
+      if (m) return new RegExp(m[1])
+    }
+    throw new Error(`no anchored-regex assert for ${varName}`)
+  }
+
+  it('新しい変数の既定値は従来どおりの挙動（空 / insecure=false / shared=true）', () => {
+    const defaults = load(readDefaults(ROLE), {
+      schema: DEFAULT_SCHEMA,
+    }) as Record<string, unknown>
+    for (const name of [
+      'gitlab_runner_k8s_pull_policy',
+      'gitlab_runner_k8s_cpu_request',
+      'gitlab_runner_k8s_cpu_limit',
+      'gitlab_runner_k8s_memory_request',
+      'gitlab_runner_k8s_memory_limit',
+      'gitlab_runner_k8s_cache_type',
+      'gitlab_runner_k8s_cache_s3_server_address',
+      'gitlab_runner_k8s_cache_s3_bucket_name',
+      'gitlab_runner_k8s_cache_s3_bucket_location',
+      'gitlab_runner_k8s_cache_s3_access_key',
+      'gitlab_runner_k8s_cache_s3_secret_key',
+    ]) {
+      expect(defaults[name]).toBe('')
+    }
+    expect(defaults.gitlab_runner_k8s_cache_s3_insecure).toBe(false)
+    expect(defaults.gitlab_runner_k8s_cache_shared).toBe(true)
+  })
+
+  it('オプトイン設定のブロックを除くと、マニフェストは導入前と完全に一致する（既定で出力が変わらない）', () => {
+    const stripped = stripIfBlocks(manifest(), OPT_IN_CONDITION)
+    expect(stripped.slice(stripped.indexOf('    runners:'))).toBe(RUNNERS_SECTION_BEFORE_OPT_IN)
+    // 除いたブロック以外にオプトイン変数を参照する行が残っていない＝既定では何も出ない。
+    expect(stripped).not.toMatch(
+      /gitlab_runner_k8s_(pull_policy|cpu_|memory_|cache_)|pull_policy|cpu_request|memory_limit|\[runners\.cache/,
+    )
+  })
+
+  it('各オプションの条件は「空でない」ときだけ真になる（空文字の既定値で発火しない）', () => {
+    const conditions = manifest()
+      .split('\n')
+      .map((l) => /^\{%\s*if\s+(.*?)\s*%\}$/.exec(l)?.[1])
+      .filter((c): c is string => !!c && OPT_IN_CONDITION.test(c))
+    expect(conditions).toEqual([
+      "gitlab_runner_k8s_cache_type == 's3' and (gitlab_runner_k8s_has_cache_access_key | bool)",
+      'gitlab_runner_k8s_pull_policy | length > 0',
+      '(gitlab_runner_k8s_cpu_request | string | length) > 0',
+      '(gitlab_runner_k8s_cpu_limit | string | length) > 0',
+      '(gitlab_runner_k8s_memory_request | string | length) > 0',
+      '(gitlab_runner_k8s_memory_limit | string | length) > 0',
+      "gitlab_runner_k8s_cache_type == 's3'",
+    ])
+  })
+
+  it.each([
+    [
+      /gitlab_runner_k8s_pull_policy/,
+      "pull_policy = {{ gitlab_runner_k8s_pull_policy.split(',') | to_json }}",
+    ],
+    [
+      /gitlab_runner_k8s_cpu_request/,
+      'cpu_request = {{ gitlab_runner_k8s_cpu_request | string | to_json }}',
+    ],
+    [
+      /gitlab_runner_k8s_cpu_limit/,
+      'cpu_limit = {{ gitlab_runner_k8s_cpu_limit | string | to_json }}',
+    ],
+    [
+      /gitlab_runner_k8s_memory_request/,
+      'memory_request = {{ gitlab_runner_k8s_memory_request | string | to_json }}',
+    ],
+    [
+      /gitlab_runner_k8s_memory_limit/,
+      'memory_limit = {{ gitlab_runner_k8s_memory_limit | string | to_json }}',
+    ],
+  ])('%s が設定されると [runners.kubernetes] に対応する1行を出力する', (condition, expected) => {
+    const body = ifBlockBody(manifest(), condition)
+    expect(body.map((l) => l.trim())).toEqual([expected])
+    // [runners.kubernetes] のキーと同じ深さ（privileged と同じインデント）に置く。
+    const privilegedIndent = manifest()
+      .split('\n')
+      .find((l) => l.trim() === 'privileged = false')!
+      .search(/\S/)
+    expect(body[0].search(/\S/)).toBe(privilegedIndent)
+  })
+
+  it('cache_type=s3 のとき [runners.cache] / [runners.cache.s3] を出力する', () => {
+    const body = ifBlockBody(manifest(), /^gitlab_runner_k8s_cache_type == 's3'$/).map((l) =>
+      l.trim(),
+    )
+    expect(body).toEqual([
+      '[runners.cache]',
+      'Type = "s3"',
+      'Shared = {{ (gitlab_runner_k8s_cache_shared | bool) | to_json }}',
+      '[runners.cache.s3]',
+      'ServerAddress = {{ gitlab_runner_k8s_cache_s3_server_address | to_json }}',
+      'BucketName = {{ gitlab_runner_k8s_cache_s3_bucket_name | to_json }}',
+      '{% if gitlab_runner_k8s_cache_s3_bucket_location | length > 0 %}',
+      'BucketLocation = {{ gitlab_runner_k8s_cache_s3_bucket_location | to_json }}',
+      '{% endif %}',
+      'Insecure = {{ (gitlab_runner_k8s_cache_s3_insecure | bool) | to_json }}',
+      "AuthenticationType = {{ ('access-key' if (gitlab_runner_k8s_has_cache_access_key | bool) else 'iam') | to_json }}",
+    ])
+  })
+
+  it('静的クレデンシャルがあるときだけ runners.cache.secretName でロールの Secret を参照する', () => {
+    const body = ifBlockBody(manifest(), /gitlab_runner_k8s_has_cache_access_key/).map((l) =>
+      l.trim(),
+    )
+    expect(body).toEqual([
+      'cache:',
+      'secretName: {{ gitlab_runner_k8s_cache_secret_name | to_json }}',
+    ])
+    // Secret 名は派生値で、DNS-1123 ラベルとして assert される。
+    expect(readFileSync(path.join(roleDir(ROLE), 'vars', 'main.yml'), 'utf8')).toContain(
+      'gitlab_runner_k8s_cache_secret_name: "{{ gitlab_runner_k8s_name }}-cache"',
+    )
+    expect(assertRegexFor('gitlab_runner_k8s_cache_secret_name').source).toBe(
+      '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$',
+    )
+  })
+
+  it('S3 のクレデンシャルはマニフェストにも shell 本文にも展開されない', () => {
+    const credential = /gitlab_runner_k8s_cache_s3_(access|secret)_key\b/
+    for (const expression of manifest().match(/\{\{[^}]*\}\}|\{%[^%]*%\}/g) ?? []) {
+      expect(expression).not.toMatch(credential)
+    }
+    const scripts = parseTasks(ROLE)
+      .map((task) => stringArg(task, 'shell'))
+      .filter((s): s is string => !!s)
+    for (const script of scripts) expect(script).not.toMatch(credential)
+    // タスクの environment にも載せない（-vvv の EXEC トレースに平文で出るため）。
+    for (const task of parseTasks(ROLE))
+      expect(JSON.stringify(task.environment ?? '')).not.toMatch(credential)
+  })
+
+  it('S3 キャッシュの Secret は一時ファイル経由で accesskey / secretkey キーとして作り、always で削除する', () => {
+    const tasks = load(readTasks(ROLE), {
+      schema: DEFAULT_SCHEMA,
+    }) as AnsibleTask[]
+    const block = tasks.find((t) => (t.name ?? '').includes('S3 cache credentials Secret'))!
+    expect(block).toBeDefined()
+    const script = flatten(block.block)
+      .map((t) => stringArg(t, 'shell'))
+      .find((s): s is string => !!s)!
+    expect(script).toContain('create secret generic {{ gitlab_runner_k8s_cache_secret_name }}')
+    // キー名はチャートの entrypoint が /secrets/accesskey・/secrets/secretkey として読む名前。
+    expect(script).toContain(
+      '--from-file=accesskey={{ gitlab_runner_k8s_cache_access_key_tempfile.path }}',
+    )
+    expect(script).toContain(
+      '--from-file=secretkey={{ gitlab_runner_k8s_cache_secret_key_tempfile.path }}',
+    )
+    const removed = flatten(block.always)
+      .map((t) => moduleArgs(t, 'file') as Record<string, unknown> | undefined)
+      .filter((a) => a?.state === 'absent')
+      .map((a) => String(a?.path))
+    expect(removed).toEqual([
+      '{{ gitlab_runner_k8s_cache_access_key_tempfile.path }}',
+      '{{ gitlab_runner_k8s_cache_secret_key_tempfile.path }}',
+    ])
+    // 値は copy の content（モジュール自身が秘匿する）でのみ書く。
+    const contents = flatten(block.block)
+      .map(copyContent)
+      .filter((c): c is string => !!c)
+    expect(contents).toEqual([
+      '{{ gitlab_runner_k8s_cache_s3_access_key | trim }}',
+      '{{ gitlab_runner_k8s_cache_s3_secret_key | trim }}',
+    ])
+  })
+
+  it('S3 キャッシュの Secret はマニフェストの適用より前に作る（チャートは optional なしで projected volume に載せるため）', () => {
+    const names = parseTasks(ROLE).map((t) => t.name ?? '')
+    const secretIndex = names.findIndex((n) => n.includes('Apply the S3 cache credentials Secret'))
+    const manifestIndex = names.findIndex((n) => n.includes('Write the HelmChart manifest'))
+    expect(secretIndex).toBeGreaterThanOrEqual(0)
+    expect(manifestIndex).toBeGreaterThan(secretIndex)
+  })
+
+  it('オプトイン設定の検証はすべての副作用（kubectl / ファイル作成）より前に行う', () => {
+    const tasks = parseTasks(ROLE)
+    const names = tasks.map((t) => t.name ?? '')
+    const lastValidate = Math.max(
+      ...[
+        'pull policy',
+        'requests and limits',
+        'shared cache type',
+        'S3 cache settings',
+        'S3 cache credentials',
+        'cache is disabled',
+      ].map((fragment) =>
+        names.findIndex(
+          (n) => n.startsWith('gitlab_runner_k8s : Validate') && n.includes(fragment),
+        ),
+      ),
+    )
+    const firstSideEffect = tasks.findIndex(
+      (t) =>
+        moduleArgs(t, 'shell') !== undefined ||
+        moduleArgs(t, 'file') !== undefined ||
+        moduleArgs(t, 'command') !== undefined,
+    )
+    expect(lastValidate).toBeGreaterThan(0)
+    expect(firstSideEffect).toBeGreaterThan(lastValidate)
+  })
+
+  describe('TOML へ展開する値の anchored regex（実際の assert から抽出して評価する）', () => {
+    it.each([
+      [
+        'gitlab_runner_k8s_pull_policy',
+        ['always', 'if-not-present', 'never', 'always,if-not-present'],
+        ['IfNotPresent', 'always, never', 'always,', 'always"]\nprivileged = true #'],
+      ],
+      [
+        'gitlab_runner_k8s_cpu_request',
+        ['', '500m', '1', '1.5'],
+        ['1.5m', '-1', '1 ', '1"\nprivileged=true', '1e3'],
+      ],
+      ['gitlab_runner_k8s_cpu_limit', ['', '250m', '2'], ['two', 'm', '.5']],
+      [
+        'gitlab_runner_k8s_memory_request',
+        ['', '512Mi', '2Gi', '1000', '1G'],
+        ['1GB', '-1Gi', '1.5Gi', 'Mi'],
+      ],
+      ['gitlab_runner_k8s_memory_limit', ['', '4Gi', '1Ti'], ['4gi', '4 Gi', '4Gi"']],
+      ['gitlab_runner_k8s_cache_type', ['', 's3'], ['gcs', 'S3', 's3 ']],
+      [
+        'gitlab_runner_k8s_cache_s3_server_address',
+        ['s3.amazonaws.com', 'minio.example.internal:9000', 'minio'],
+        [
+          '',
+          'https://s3.amazonaws.com',
+          's3.amazonaws.com/',
+          'host"]\nprivileged = true',
+          '-bad.example',
+        ],
+      ],
+      [
+        'gitlab_runner_k8s_cache_s3_bucket_name',
+        ['ci-cache', 'my.bucket.01'],
+        ['', 'CI_Cache', 'ab', 'bucket"'],
+      ],
+      [
+        'gitlab_runner_k8s_cache_s3_bucket_location',
+        ['', 'us-east-1', 'ap-northeast-1'],
+        ['Tokyo 1', 'us_east_1', '-us', 'r"'],
+      ],
+    ])('%s', (varName, valid, invalid) => {
+      const re = assertRegexFor(varName as string)
+      for (const v of valid as string[])
+        expect(`${varName}=${v}:${re.test(v)}`).toBe(`${varName}=${v}:true`)
+      for (const v of invalid as string[])
+        expect(`${varName}=${v}:${re.test(v)}`).toBe(`${varName}=${v}:false`)
+    })
+
+    it('S3 のクレデンシャル assert は値を fail_msg に展開しない', () => {
+      const credAssert = parseTasks(ROLE).find((t) =>
+        (t.name ?? '').includes('S3 cache credentials'),
+      )!
+      const args = moduleArgs(credAssert, 'assert') as {
+        fail_msg: string
+        success_msg: string
+      }
+      expect(args.fail_msg).not.toContain('{{')
+      expect(args.success_msg).not.toContain('{{')
+      expect(credAssert.no_log).toBeUndefined()
+    })
   })
 })

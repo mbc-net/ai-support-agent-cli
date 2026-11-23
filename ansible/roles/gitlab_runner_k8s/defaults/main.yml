@@ -38,6 +38,52 @@ gitlab_runner_k8s_concurrent: 4
 # ジョブの既定コンテナイメージ（.gitlab-ci.yml で `image:` を指定しない場合に使う）。
 gitlab_runner_k8s_job_image: alpine:latest
 
+# ジョブのイメージ取得ポリシー（runner の `pull_policy`）。空なら設定しない
+# （＝ Kubernetes の既定に従う。従来どおり）。`always` / `if-not-present` / `never` の
+# いずれか、またはカンマ区切りで複数（例: `always,if-not-present` は always で失敗した
+# ときに if-not-present で再試行する）。空白は含めない。
+# `if-not-present` はノードにキャッシュ済みのイメージを再利用するため起動が速くなる
+# 一方、あるジョブが認証付きで取得した非公開イメージを、同じノード上の別ジョブが認証
+# なしで使えてしまう（GitLab 公式の注意事項）。テナント間でノードを共有する場合は注意。
+gitlab_runner_k8s_pull_policy: ''
+
+# ジョブ Pod の build コンテナに与える requests / limits。空なら設定しない（従来どおり）。
+# Kubernetes の数量表記で与える。CPU は `500m` / `1` / `1.5`、メモリは `512Mi` / `2Gi` 等。
+# requests を与えるとスケジューラがノードの空きを見て配置するため、
+# gitlab_runner_k8s_concurrent を安全に引き上げられる。limits を超えたメモリ使用は
+# OOMKilled になるので、ジョブの実測値を見てから設定する。
+gitlab_runner_k8s_cpu_request: ''
+gitlab_runner_k8s_cpu_limit: ''
+gitlab_runner_k8s_memory_request: ''
+gitlab_runner_k8s_memory_limit: ''
+
+# 共有キャッシュ（S3 互換オブジェクトストレージ）。空なら設定しない（従来どおり、
+# キャッシュはジョブ Pod 内に閉じて毎回コールドスタートになる）。現在は `s3` のみ対応
+# （AWS S3 / MinIO 等）。
+gitlab_runner_k8s_cache_type: ''
+
+# true なら全ランナーマネージャ（レプリカ・同じバケットを使う別ランナー）でキャッシュを
+# 共有する。false にするとランナーごとに別パスへ保存され、レプリカ間でヒットしない。
+gitlab_runner_k8s_cache_shared: true
+
+# S3 エンドポイントの `host[:port]`（スキームは付けない。例: s3.amazonaws.com /
+# minio.example.internal:9000）。cache_type が s3 のとき必須。
+gitlab_runner_k8s_cache_s3_server_address: ''
+
+# バケット名（cache_type が s3 のとき必須）とリージョン（空なら設定しない）。
+gitlab_runner_k8s_cache_s3_bucket_name: ''
+gitlab_runner_k8s_cache_s3_bucket_location: ''
+
+# true なら HTTP（非 TLS）で接続する。社内 MinIO 等で TLS を終端していない場合のみ。
+gitlab_runner_k8s_cache_s3_insecure: false
+
+# 静的クレデンシャル（ANSIBLE# 変数から渡す）。両方指定するか両方空にする。
+# 両方指定: ロールが Kubernetes Secret（accesskey / secretkey）を作り、チャートの
+#   `runners.cache.secretName` で参照させる（値はマニフェストにも TOML にも載らない）。
+# 両方空: `AuthenticationType = "iam"`（ノードの IAM ロール等の認証情報を使う）。
+gitlab_runner_k8s_cache_s3_access_key: ''
+gitlab_runner_k8s_cache_s3_secret_key: ''
+
 # ジョブ Pod を起こす名前空間は変数にしない。ランナー本体と同じ名前空間に固定する。
 # 別名前空間へ起こすにはチャートの `rbac.clusterWideAccess` が必要になり、Role が
 # ClusterRole へ格上げされて全名前空間の Pod / Secret を操作できてしまうため。

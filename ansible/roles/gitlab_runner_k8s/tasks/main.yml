@@ -46,12 +46,27 @@
 #   与えない。`namespaces` / `apps/deployments` / `poddisruptionbudgets` /
 #   `priorityclasses` は namespace_per_job 等の未使用機能向けなので同様に与えない。
 #
-# リソース制限は既定で設定しない（既知の制限）:
-#   runner マネージャにもジョブ Pod にも requests/limits を与えていない。CI ジョブが必要
-#   とするリソースはジョブごとに大きく異なり、ロールが既定値を押し付けると、正常なジョブが
-#   原因の分かりにくい OOMKilled で落ちるようになるため。同時実行ジョブがノードを食い潰す
-#   リスクは `gitlab_runner_k8s_concurrent`（既定 4）で間接的に抑える。厳密な上限が要る
-#   場合は runner 名前空間に LimitRange / ResourceQuota を設定して運用する。
+# リソース制限は既定で設定しない（オプトイン）:
+#   既定では runner マネージャにもジョブ Pod にも requests/limits を与えない。CI ジョブが
+#   必要とするリソースはジョブごとに大きく異なり、ロールが既定値を押し付けると、正常な
+#   ジョブが原因の分かりにくい OOMKilled で落ちるようになるため。ジョブ Pod の build
+#   コンテナには `gitlab_runner_k8s_cpu_request` / `_cpu_limit` / `_memory_request` /
+#   `_memory_limit` で明示的に与えられる（空なら TOML に出さない）。未設定の場合、同時実行
+#   ジョブがノードを食い潰すリスクは `gitlab_runner_k8s_concurrent`（既定 4）で間接的に
+#   抑える。helper / service コンテナと runner マネージャ自体には引き続き与えない。厳密な
+#   上限が要る場合は runner 名前空間に LimitRange / ResourceQuota を設定して運用する。
+#
+# 共有キャッシュ（S3）の秘匿値の扱い:
+#   アクセスキー / シークレットキーはランナートークンと同じ経路で扱う（0600 一時ファイル →
+#   `kubectl create secret --from-file=` → always で削除）。HelmChart CR には Secret の
+#   名前だけを `runners.cache.secretName` として書く。チャートはその Secret を runner
+#   マネージャの /secrets へ projected volume で載せ、entrypoint が accesskey / secretkey を
+#   CACHE_S3_ACCESS_KEY / CACHE_S3_SECRET_KEY として export し、register 時に config.toml の
+#   [runners.cache.s3] へ反映する（チャート 0.91.2 の templates/configmap.yaml で確認）。
+#   読むのは kubelet であり runner の API 権限は要らないため、RBAC は広げない。
+#   Secret の値だけを差し替えても Deployment は再起動しない（チャートの checksum 注釈は
+#   チャート自身の configmap / secrets にしか掛かっていない）。キーをローテーションした
+#   ときは `kubectl rollout restart deployment/<name>` で再起動する（トークンも同じ）。
 #
 # シェルインジェクション対策:
 #   ガード（src/server-setup/ansible-task-guard.ts）は include_role の変数「名」しか
@@ -63,6 +78,8 @@
   ansible.builtin.set_fact:
     gitlab_runner_k8s_has_auth: "{{ (gitlab_runner_k8s_auth_token | default('') | trim | length) > 0 }}"
     gitlab_runner_k8s_has_reg: "{{ (gitlab_runner_k8s_registration_token | default('') | trim | length) > 0 }}"
+    gitlab_runner_k8s_has_cache_access_key: "{{ (gitlab_runner_k8s_cache_s3_access_key | default('') | trim | length) > 0 }}"
+    gitlab_runner_k8s_has_cache_secret_key: "{{ (gitlab_runner_k8s_cache_s3_secret_key | default('') | trim | length) > 0 }}"
   no_log: true
 
 - name: "gitlab_runner_k8s : Validate exactly one token flow is configured"
@@ -144,6 +161,8 @@
       - gitlab_runner_k8s_namespace | length <= 63
       - gitlab_runner_k8s_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
       - gitlab_runner_k8s_secret_name | length <= 63
+      - gitlab_runner_k8s_cache_secret_name is match('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+      - gitlab_runner_k8s_cache_secret_name | length <= 63
     fail_msg: >-
       gitlab_runner_k8s_name / _namespace must be lowercase DNS-1123 labels
       (alphanumerics and "-", starting and ending with an alphanumeric). The
@@ -187,6 +206,120 @@
       gitlab_runner_k8s_job_image must be a container image reference
       (e.g. alpine:latest). Got: {{ gitlab_runner_k8s_job_image }}
     success_msg: "Default job image is well-formed."
+
+- name: "gitlab_runner_k8s : Validate the job image pull policy"
+  # TOML の配列へ展開するため、許可リストの値以外（引用符・改行・空白を含む値）を弾く。
+  # 空なら pull_policy を出力しない（従来どおり）。
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_pull_policy is string
+      - >-
+        gitlab_runner_k8s_pull_policy == ''
+        or gitlab_runner_k8s_pull_policy is match('^(always|if-not-present|never)(,(always|if-not-present|never))*$')
+    fail_msg: >-
+      gitlab_runner_k8s_pull_policy must be empty (use the Kubernetes default)
+      or one or more of always / if-not-present / never, comma-separated
+      without spaces (e.g. "if-not-present" or "always,if-not-present"). Got:
+      {{ gitlab_runner_k8s_pull_policy }}
+    success_msg: "Job image pull policy is valid."
+
+- name: "gitlab_runner_k8s : Validate the job resource requests and limits"
+  # Kubernetes の数量表記に限定する（TOML の basic string へ埋め込むため、引用符・
+  # バックスラッシュ・改行を含む値もここで弾ける）。空なら該当行を出力しない。
+  # ANSIBLE# 変数は文字列だが、YAML の数値で渡されても検証できるよう `| string` で揃える。
+  ansible.builtin.assert:
+    that:
+      - (gitlab_runner_k8s_cpu_request | string) is match('^(|[0-9]+m|[0-9]+(\.[0-9]+)?)$')
+      - (gitlab_runner_k8s_cpu_limit | string) is match('^(|[0-9]+m|[0-9]+(\.[0-9]+)?)$')
+      - (gitlab_runner_k8s_memory_request | string) is match('^(|[0-9]+(Ki|Mi|Gi|Ti|K|M|G|T)?)$')
+      - (gitlab_runner_k8s_memory_limit | string) is match('^(|[0-9]+(Ki|Mi|Gi|Ti|K|M|G|T)?)$')
+    fail_msg: >-
+      gitlab_runner_k8s_cpu_request / _cpu_limit must be empty or a Kubernetes
+      CPU quantity (e.g. 500m, 1, 1.5), and gitlab_runner_k8s_memory_request /
+      _memory_limit must be empty or a Kubernetes memory quantity (e.g. 512Mi,
+      2Gi). Got cpu_request={{ gitlab_runner_k8s_cpu_request }},
+      cpu_limit={{ gitlab_runner_k8s_cpu_limit }},
+      memory_request={{ gitlab_runner_k8s_memory_request }},
+      memory_limit={{ gitlab_runner_k8s_memory_limit }}.
+    success_msg: "Job resource requests and limits are valid."
+
+- name: "gitlab_runner_k8s : Validate the shared cache type"
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_cache_type is string
+      - gitlab_runner_k8s_cache_type is match('^(|s3)$')
+    fail_msg: >-
+      gitlab_runner_k8s_cache_type must be empty (no shared cache) or "s3"
+      (an S3-compatible object storage such as AWS S3 or MinIO). Got:
+      {{ gitlab_runner_k8s_cache_type }}
+    success_msg: "Shared cache type is valid."
+
+- name: "gitlab_runner_k8s : Validate the S3 cache settings"
+  # いずれも TOML の basic string / 真偽値へ展開するため、アンカー付き正規表現と
+  # 真偽値の綴りで縛る。サーバーアドレスはチャート・runner の仕様どおりスキームを付けない
+  # `host[:port]`（スキームを付けると runner がホスト名として解釈して接続できない）。
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_cache_s3_server_address is match('^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$')
+      - gitlab_runner_k8s_cache_s3_bucket_name is match('^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
+      - gitlab_runner_k8s_cache_s3_bucket_location is match('^([a-z0-9]+(-[a-z0-9]+)*)?$')
+      - (gitlab_runner_k8s_cache_shared | string | lower) in ['true', 'false', 'yes', 'no', '1', '0']
+      - (gitlab_runner_k8s_cache_s3_insecure | string | lower) in ['true', 'false', 'yes', 'no', '1', '0']
+    fail_msg: >-
+      gitlab_runner_k8s_cache_type=s3 requires
+      gitlab_runner_k8s_cache_s3_server_address (host[:port] without a scheme,
+      e.g. s3.amazonaws.com or minio.example.internal:9000) and
+      gitlab_runner_k8s_cache_s3_bucket_name (an S3 bucket name).
+      gitlab_runner_k8s_cache_s3_bucket_location must be empty or a region name
+      (e.g. ap-northeast-1), and gitlab_runner_k8s_cache_shared /
+      _cache_s3_insecure must be booleans. Got
+      server_address={{ gitlab_runner_k8s_cache_s3_server_address }},
+      bucket_name={{ gitlab_runner_k8s_cache_s3_bucket_name }},
+      bucket_location={{ gitlab_runner_k8s_cache_s3_bucket_location }},
+      shared={{ gitlab_runner_k8s_cache_shared }},
+      insecure={{ gitlab_runner_k8s_cache_s3_insecure }}.
+    success_msg: "S3 cache settings are valid."
+  when: gitlab_runner_k8s_cache_type == 's3'
+
+- name: "gitlab_runner_k8s : Validate the S3 cache credentials"
+  # 片方だけの指定は黙って IAM へ倒さず失敗させる（トークンと同じくフォールバックしない）。
+  # 値は `--from-file=` で Secret の値になるため、空白（貼り付け時の改行や前後の空白を
+  # trim した後に残る空白＝コマンドや複数値の貼り付け）を含む値を弾く。
+  # 値は fail_msg にも that にも展開しない（no_log なしで値を出さないため）。
+  ansible.builtin.assert:
+    that:
+      - (gitlab_runner_k8s_has_cache_access_key | bool) == (gitlab_runner_k8s_has_cache_secret_key | bool)
+      - >-
+        not (gitlab_runner_k8s_has_cache_access_key | bool)
+        or ((gitlab_runner_k8s_cache_s3_access_key | trim) is match('^\S+$'))
+      - >-
+        not (gitlab_runner_k8s_has_cache_secret_key | bool)
+        or ((gitlab_runner_k8s_cache_s3_secret_key | trim) is match('^\S+$'))
+    fail_msg: >-
+      Set both gitlab_runner_k8s_cache_s3_access_key and
+      gitlab_runner_k8s_cache_s3_secret_key (static credentials; reference
+      ANSIBLE# secret variables from the recipe), or leave both empty to use
+      IAM credentials from the node. Neither value may contain whitespace.
+    success_msg: "S3 cache credentials are consistent."
+  when: gitlab_runner_k8s_cache_type == 's3'
+
+- name: "gitlab_runner_k8s : Validate no cache option is set while the cache is disabled"
+  # cache_type を空のまま他のキャッシュ設定だけ与えた場合、黙って無視すると「設定したのに
+  # キャッシュが効かない」原因が実行ログから分からない。明示的に失敗させる。
+  ansible.builtin.assert:
+    that:
+      - gitlab_runner_k8s_cache_s3_server_address | default('') | length == 0
+      - gitlab_runner_k8s_cache_s3_bucket_name | default('') | length == 0
+      - gitlab_runner_k8s_cache_s3_bucket_location | default('') | length == 0
+      - not (gitlab_runner_k8s_has_cache_access_key | bool)
+      - not (gitlab_runner_k8s_has_cache_secret_key | bool)
+    fail_msg: >-
+      gitlab_runner_k8s_cache_s3_* options are set but gitlab_runner_k8s_cache_type
+      is empty, so they would be ignored. Set gitlab_runner_k8s_cache_type to
+      "s3" to enable the shared cache, or remove the gitlab_runner_k8s_cache_s3_*
+      options.
+    success_msg: "No cache option is set while the cache is disabled."
+  when: gitlab_runner_k8s_cache_type == ''
 
 - name: "gitlab_runner_k8s : Validate cluster access paths"
   # ここで検証した値のみを shell 本文へ展開してよい（ファイル冒頭のコメント参照）。
@@ -367,8 +500,82 @@
       when: gitlab_runner_k8s_empty_tempfile.path is defined
       changed_when: false
 
+- name: "gitlab_runner_k8s : Create the S3 cache credentials Secret"
+  # トークン Secret と同じ手順（ファイル冒頭「秘匿値の扱い」参照）。キー名 accesskey /
+  # secretkey はチャートの entrypoint が /secrets/accesskey・/secrets/secretkey として
+  # 読む名前で、変えてはならない。静的クレデンシャルを与えない（IAM）場合は作らない。
+  when:
+    - gitlab_runner_k8s_cache_type == 's3'
+    - gitlab_runner_k8s_has_cache_access_key | bool
+  block:
+    - name: "gitlab_runner_k8s : Create a secure temporary file for the cache access key"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: gitlab_runner_k8s_cache_ak_
+      register: gitlab_runner_k8s_cache_access_key_tempfile
+      changed_when: false
+
+    - name: "gitlab_runner_k8s : Create a secure temporary file for the cache secret key"
+      ansible.builtin.tempfile:
+        state: file
+        prefix: gitlab_runner_k8s_cache_sk_
+      register: gitlab_runner_k8s_cache_secret_key_tempfile
+      changed_when: false
+
+    - name: "gitlab_runner_k8s : Write the cache access key into its temporary file"
+      # `content` は copy モジュール自身が値を秘匿する（トークンの書き出しと同じ理由で
+      # タスクレベルの no_log は付けない）。`| trim` も同じ理由で必須。
+      ansible.builtin.copy:
+        content: "{{ gitlab_runner_k8s_cache_s3_access_key | trim }}"
+        dest: "{{ gitlab_runner_k8s_cache_access_key_tempfile.path }}"
+        mode: '0600'
+      changed_when: true
+
+    - name: "gitlab_runner_k8s : Write the cache secret key into its temporary file"
+      ansible.builtin.copy:
+        content: "{{ gitlab_runner_k8s_cache_s3_secret_key | trim }}"
+        dest: "{{ gitlab_runner_k8s_cache_secret_key_tempfile.path }}"
+        mode: '0600'
+      changed_when: true
+
+    - name: "gitlab_runner_k8s : Apply the S3 cache credentials Secret"
+      # 値はファイル経由でのみ kubectl へ渡すため argv に現れない。stdout は
+      # "secret/x configured" 等で秘匿値を含まないため no_log は付けない。
+      ansible.builtin.shell: >-
+        set -o pipefail &&
+        {{ gitlab_runner_k8s_kubectl }} --kubeconfig={{ gitlab_runner_k8s_kubeconfig }} --request-timeout=30s
+        -n {{ gitlab_runner_k8s_namespace }}
+        create secret generic {{ gitlab_runner_k8s_cache_secret_name }}
+        --from-file=accesskey={{ gitlab_runner_k8s_cache_access_key_tempfile.path }}
+        --from-file=secretkey={{ gitlab_runner_k8s_cache_secret_key_tempfile.path }}
+        --dry-run=client -o yaml
+        | {{ gitlab_runner_k8s_kubectl }} --kubeconfig={{ gitlab_runner_k8s_kubeconfig }} --request-timeout=30s
+        apply -f -
+      args:
+        executable: /bin/bash
+      register: gitlab_runner_k8s_cache_secret_apply
+      changed_when: "'unchanged' not in gitlab_runner_k8s_cache_secret_apply.stdout"
+  always:
+    - name: "gitlab_runner_k8s : Remove the cache access key temporary file"
+      ansible.builtin.file:
+        path: "{{ gitlab_runner_k8s_cache_access_key_tempfile.path }}"
+        state: absent
+      when: gitlab_runner_k8s_cache_access_key_tempfile.path is defined
+      changed_when: false
+
+    - name: "gitlab_runner_k8s : Remove the cache secret key temporary file"
+      ansible.builtin.file:
+        path: "{{ gitlab_runner_k8s_cache_secret_key_tempfile.path }}"
+        state: absent
+      when: gitlab_runner_k8s_cache_secret_key_tempfile.path is defined
+      changed_when: false
+
 - name: "gitlab_runner_k8s : Write the HelmChart manifest"
-  # 秘匿値は含まない（トークンは Secret 名の参照のみ）。監査と再適用のためノード上へ残す。
+  # 秘匿値は含まない（トークン・S3 キャッシュのキーは Secret 名の参照のみ）。監査と
+  # 再適用のためノード上へ残す。
+  #
+  # オプトインの設定（pull_policy / requests・limits / [runners.cache]）は変数が空なら
+  # 1行も出力しない。既存の導入では生成される TOML が変わらず、Deployment も再起動しない。
   #
   # `runners.secret` にロールが作った Secret 名を渡す。チャート自身の Secret 生成は
   # `if or .Values.runnerRegistrationToken .Values.runnerToken` ガードの下にあり、
@@ -420,6 +627,10 @@
             create: true
           runners:
             secret: {{ gitlab_runner_k8s_secret_name | to_json }}
+      {% if gitlab_runner_k8s_cache_type == 's3' and (gitlab_runner_k8s_has_cache_access_key | bool) %}
+            cache:
+              secretName: {{ gitlab_runner_k8s_cache_secret_name | to_json }}
+      {% endif %}
       {% if gitlab_runner_k8s_has_reg | bool %}
             tags: {{ gitlab_runner_k8s_tags | to_json }}
             runUntagged: {{ (gitlab_runner_k8s_run_untagged | bool) | to_json }}
@@ -432,6 +643,34 @@
                   image = {{ gitlab_runner_k8s_job_image | to_json }}
                   privileged = false
                   automount_service_account_token = false
+      {% if gitlab_runner_k8s_pull_policy | length > 0 %}
+                  pull_policy = {{ gitlab_runner_k8s_pull_policy.split(',') | to_json }}
+      {% endif %}
+      {% if (gitlab_runner_k8s_cpu_request | string | length) > 0 %}
+                  cpu_request = {{ gitlab_runner_k8s_cpu_request | string | to_json }}
+      {% endif %}
+      {% if (gitlab_runner_k8s_cpu_limit | string | length) > 0 %}
+                  cpu_limit = {{ gitlab_runner_k8s_cpu_limit | string | to_json }}
+      {% endif %}
+      {% if (gitlab_runner_k8s_memory_request | string | length) > 0 %}
+                  memory_request = {{ gitlab_runner_k8s_memory_request | string | to_json }}
+      {% endif %}
+      {% if (gitlab_runner_k8s_memory_limit | string | length) > 0 %}
+                  memory_limit = {{ gitlab_runner_k8s_memory_limit | string | to_json }}
+      {% endif %}
+      {% if gitlab_runner_k8s_cache_type == 's3' %}
+                [runners.cache]
+                  Type = "s3"
+                  Shared = {{ (gitlab_runner_k8s_cache_shared | bool) | to_json }}
+                  [runners.cache.s3]
+                    ServerAddress = {{ gitlab_runner_k8s_cache_s3_server_address | to_json }}
+                    BucketName = {{ gitlab_runner_k8s_cache_s3_bucket_name | to_json }}
+      {% if gitlab_runner_k8s_cache_s3_bucket_location | length > 0 %}
+                    BucketLocation = {{ gitlab_runner_k8s_cache_s3_bucket_location | to_json }}
+      {% endif %}
+                    Insecure = {{ (gitlab_runner_k8s_cache_s3_insecure | bool) | to_json }}
+                    AuthenticationType = {{ ('access-key' if (gitlab_runner_k8s_has_cache_access_key | bool) else 'iam') | to_json }}
+      {% endif %}
   register: gitlab_runner_k8s_manifest
 
 - name: "gitlab_runner_k8s : Apply the HelmChart"
