@@ -636,3 +636,21 @@ NotApplicable without observations. The internal sshd command guard remains
 as a second boundary. The public `inspect-runtime` context failure remains
 `context_observation_failed`; no private diagnostic is exposed. This does
 not add an isolated sshd runner or enable `preflight` or runtime actors.
+
+### P2a service access policy core
+
+`files/service_access_policy.py` provides `plan_policy(snapshot)` for the
+explicitly supplied v1 service policy model. It resolves catalog references,
+checks complete Web-only/SSH set intersections and restricted SSH residuals,
+and keeps direct Web, CloudFront peers/viewers and proxy trust separate.
+Shared Web firewall permissions retain all binding owners. Schema, scope,
+resource budgets and the supplied dedicated-edge reference model fail closed.
+
+The immutable candidate and its public summary always report runtime_ready,
+observation_verified, edge_verified and enforcement_verified as false.
+Completeness and ownership fields are supplied claims. The module performs no
+I/O and is not in the fixed runtime/bootstrap/install asset lists. No CLI
+command or actor is enabled. Host/edge observers, persistent ownership, API/UI,
+coordination and live apply remain later stages. The dedicated tests run in
+the existing role unit suite; see the admin-docs service-source-ip-policy-core-v1
+contract for the exact schema and limits.
