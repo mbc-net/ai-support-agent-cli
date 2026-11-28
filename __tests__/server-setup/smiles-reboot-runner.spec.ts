@@ -73,9 +73,13 @@ describe('dedicated source profile runner',()=>{
   jest.mocked(executeServerSetupAnsible).mockResolvedValue({success:true,data:{public:true}})
   const result=await runSmilesRebootProfile(p,{commandId:'command',agentId:'agent',client:c as unknown as ApiClient});expect(result.success).toBe(true);expect(sourceRuntimeReady).not.toHaveBeenCalled();expect(freshSsh).not.toHaveBeenCalled();expect(executeServerSetupAnsible).toHaveBeenCalledWith(expect.objectContaining({mode:'ecs',targetOs:'linux',secretNames:[],variables:expect.objectContaining({SMILES_TUNNEL_RUN_ID:p.recoveryProfile.runId,SMILES_SESSION_INTENT:'null',SMILES_REBOOT_SOURCE_RECEIPT_JSON:'null',SMILES_REBOOT_SOURCE_CLOSURE_JSON:'null'})}))
   expect(result.serverSetupConfigurationCompletion).toBeUndefined()
-  const typed={recoveryMetadata:{synthetic:'public'},serverSetupLocalTermination:{processClosed:true,executionId:'execution',sshHostId:'host'}}
+  const typed={recoveryMetadata:{synthetic:'public'},serverSetupLocalTermination:{processClosed:true,executionId:'execution',sshHostId:'host'},serverSetupLocalCleanup:{sensitiveFilesRemoved:true,executionId:'execution',sshHostId:'host'}}
   jest.mocked(executeServerSetupAnsible).mockResolvedValue({success:true,data:typed})
   const closed=await runSmilesRebootProfile(p,{commandId:'command',agentId:'agent',client:c as unknown as ApiClient});expect(closed.data).toBe(typed);expect(closed.serverSetupConfigurationCompletion).toEqual({executionId:'execution',evidence:{kind:'completed',sshHostId:'host',processClosed:true}})
+  for(const success of [true,false])for(const cleanup of [undefined,{sensitiveFilesRemoved:false,executionId:'execution',sshHostId:'host'},{sensitiveFilesRemoved:true,executionId:'wrong',sshHostId:'host'},{sensitiveFilesRemoved:true,executionId:'execution',sshHostId:'wrong'},{sensitiveFilesRemoved:true,executionId:'execution',sshHostId:'host',extra:'unknown'}]){
+   jest.mocked(executeServerSetupAnsible).mockResolvedValue({success,data:{...typed,serverSetupLocalCleanup:cleanup},serverSetupConfigurationCompletion:{executionId:'execution',evidence:{kind:'completed',sshHostId:'host',processClosed:true}}})
+   const unclean=await runSmilesRebootProfile(p,{commandId:'command',agentId:'agent',client:c as unknown as ApiClient});expect(unclean.serverSetupConfigurationCompletion).toBeUndefined()
+  }
   jest.mocked(executeServerSetupAnsible).mockClear();c.getServerSetupVariables.mockResolvedValue({variables:{PRIVATE:'SECRET'},secretNames:['PRIVATE']});expect((await runSmilesRebootProfile(p,{commandId:'command',agentId:'agent',client:c as unknown as ApiClient})).success).toBe(false);expect(executeServerSetupAnsible).not.toHaveBeenCalled()
  })
  test('target resident route refuses before JIT even with pinned public body',async()=>{const c=client();const p=payload();p.dispatchMode='resident_agent';p.recoveryProfile={...profile(),executorProfile:'smiles-target-ansible-v1',profileSha256:TARGET_PROFILE_SHA256,stepId:'observe'};p.body=bodies.observe;const result=await runSmilesRebootProfile(p,{commandId:'command',agentId:'agent',client:c as unknown as ApiClient});expect(result.success).toBe(false);expect(c.getServerSetupSshCredential).not.toHaveBeenCalled()})
@@ -90,12 +94,12 @@ describe('dedicated source profile runner',()=>{
   }
   c.getServerSetupSshCredential.mockResolvedValue({...await c.getServerSetupSshCredential(),hostname:'133.18.114.57'});c.getServerSetupVariables.mockResolvedValue({variables:{},secretNames:[]});(c as unknown as {getTenantCode:()=>string}).getTenantCode=()=> 'tenant'
   for(const proof of [undefined,{processClosed:false,executionId:'execution',sshHostId:'host'},{processClosed:true,executionId:'wrong',sshHostId:'host'},{processClosed:true,executionId:'execution',sshHostId:'wrong'},{processClosed:true,executionId:'execution',sshHostId:'host',private:'SECRET'},{processClosed:true,executionId:'execution',sshHostId:'host'}]){
-   jest.mocked(executeServerSetupAnsible).mockResolvedValue({success:false,error:'RAW_PRIVATE_ERROR',data:JSON.stringify({serverSetupLocalTermination:proof,raw:'PRIVATE_BODY'})})
+   jest.mocked(executeServerSetupAnsible).mockResolvedValue({success:false,error:'RAW_PRIVATE_ERROR',data:JSON.stringify({serverSetupLocalTermination:proof,serverSetupLocalCleanup:{sensitiveFilesRemoved:true,executionId:'execution',sshHostId:'host'},raw:'PRIVATE_BODY'})})
    const result=await runSmilesRebootProfile(p,{commandId:'command',agentId:'agent',client:c as unknown as ApiClient});expect(result.success).toBe(false);expect(JSON.stringify(result)).not.toMatch(/RAW_PRIVATE|PRIVATE_BODY|SECRET/)
    expect(executeServerSetupAnsible).toHaveBeenCalled()
    const allowed=['observe','barrier','verify'].includes(stepId)&&proof?.processClosed===true&&proof.executionId==='execution'&&proof.sshHostId==='host'&&Object.keys(proof).length===3
    expect(Boolean(result.serverSetupConfigurationCompletion)).toBe(allowed)
-   if(allowed)expect(result.data).toEqual({serverSetupLocalTermination:{processClosed:true,executionId:'execution',sshHostId:'host'}});else expect(result.data).toBeUndefined()
+   if(allowed)expect(result.data).toEqual({serverSetupLocalTermination:{processClosed:true,executionId:'execution',sshHostId:'host'},serverSetupLocalCleanup:{sensitiveFilesRemoved:true,executionId:'execution',sshHostId:'host'}});else expect(result.data).toBeUndefined()
   }
  })
  test('modified target recipe rejected before SSH credential',async()=>{const c=client();const p=payload();p.recoveryProfile={...profile(),executorProfile:'smiles-target-ansible-v1',profileSha256:TARGET_PROFILE_SHA256,stepId:'observe'};p.body=bodies.observe+'\n# drift';expect((await runSmilesRebootProfile(p,{commandId:'command',agentId:'agent',client:c as unknown as ApiClient})).success).toBe(false);expect(c.getServerSetupSshCredential).not.toHaveBeenCalled()})

@@ -23,7 +23,10 @@ function realLocalTermination(executed:CommandResult,payload:ServerSetupExecPayl
  const closed=data&&typeof data==='object'&&!Array.isArray(data)?(data as Record<string,unknown>).serverSetupLocalTermination:undefined
  if(!closed||typeof closed!=='object'||Array.isArray(closed)||Object.keys(closed).sort().join(',')!=='executionId,processClosed,sshHostId')return false
  const proof=closed as Record<string,unknown>
- return proof.processClosed===true&&proof.executionId===payload.executionId&&proof.sshHostId===payload.sshHostId
+ const cleanup=(data as Record<string,unknown>).serverSetupLocalCleanup
+ if(!cleanup||typeof cleanup!=='object'||Array.isArray(cleanup)||Object.keys(cleanup).sort().join(',')!=='executionId,sensitiveFilesRemoved,sshHostId')return false
+ const removed=cleanup as Record<string,unknown>
+ return proof.processClosed===true&&proof.executionId===payload.executionId&&proof.sshHostId===payload.sshHostId&&removed.sensitiveFilesRemoved===true&&removed.executionId===payload.executionId&&removed.sshHostId===payload.sshHostId
 }
 export async function runSmilesRebootProfile(payload:ServerSetupExecPayload,ctx:Context):Promise<CommandResult>{
  let readonlyClosed=false
@@ -62,8 +65,9 @@ export async function runSmilesRebootProfile(payload:ServerSetupExecPayload,ctx:
   // This fixed, secret-free target profile closes local delivery, not the remote
   // supervised guardian. Generic Ansible completion classification is unchanged.
   const locallyClosed=realLocalTermination(executed,payload)
-  if(executed.success)return locallyClosed?{...executed,serverSetupConfigurationCompletion:closedReadonlyFailure(payload).serverSetupConfigurationCompletion}:executed
-  if(['observe','barrier','verify'].includes(p.stepId)&&locallyClosed)return closedReadonlyFailure(payload)
+  const projected={...executed};delete projected.serverSetupConfigurationCompletion
+  if(executed.success)return locallyClosed?{...projected,serverSetupConfigurationCompletion:closedReadonlyFailure(payload).serverSetupConfigurationCompletion}:projected
+  if(['observe','barrier','verify'].includes(p.stepId)&&locallyClosed){const failure=closedReadonlyFailure(payload);return {...failure,data:{...failure.data as Record<string,unknown>,serverSetupLocalCleanup:{sensitiveFilesRemoved:true,executionId:payload.executionId,sshHostId:payload.sshHostId}}}}
   return errorResult('SMILES_REBOOT_PROFILE_REFUSED')
  }catch{
   if(closedSignal&&!readonlyClosed){

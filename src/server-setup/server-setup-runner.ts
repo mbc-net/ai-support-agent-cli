@@ -885,6 +885,7 @@ export async function executeServerSetupAnsible(
   // sequence.
   let sentry: ReturnType<typeof inspectSentryTasks> = null
   let localProcessClosed = false
+  let sensitiveFilesRemoved = false
   let completion: CommandResult['serverSetupConfigurationCompletion']
   let synchronousTasks = false
   let sentryCompanionsSynchronous = false
@@ -1331,6 +1332,7 @@ export async function executeServerSetupAnsible(
     // after this function returns.
     try {
       rmSync(tmpDir, { recursive: true, force: true })
+      sensitiveFilesRemoved = true
     } catch (cleanupError) {
       const message = getErrorMessage(cleanupError)
       logger.error(`[server-setup] Failed to remove temp dir ${tmpDir}: ${message}`)
@@ -1345,7 +1347,9 @@ export async function executeServerSetupAnsible(
     const data = typeof result.data === 'string' ? JSON.parse(result.data) : (result.data ?? {})
     const withProof = {...data as Record<string, unknown>, serverSetupLocalTermination: {
       processClosed: true, executionId, sshHostId: input.sshHostId,
-    }}
+    }, ...(input.recoveryProfile && sensitiveFilesRemoved ? {
+      serverSetupLocalCleanup: {sensitiveFilesRemoved: true, executionId, sshHostId: input.sshHostId},
+    } : {})}
     result = {...result, data: typeof result.data === 'string' ? JSON.stringify(withProof) : withProof}
   }
   return completion ? {...result, serverSetupConfigurationCompletion: completion} : result

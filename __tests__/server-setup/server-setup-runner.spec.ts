@@ -227,6 +227,18 @@ beforeEach(() => {
 })
 
 describe('configuration completion proof', () => {
+  it.each([true, false])('managed cleanup evidence requires actual temp removal: %s', async removed => {
+    if (!removed) mockRmSync.mockImplementationOnce(() => { throw new Error('synthetic cleanup failure') })
+    const pending = executeServerSetupAnsible({executionId:'exec-1',body:DEFAULT_BODY,mode:'ecs',targetOs:'linux',credential:CREDENTIAL,variables:{},secretNames:[],tenantCode:'acme',sshHostId:'host-1',client:makeClient(),recoveryProfile:{} as import('../../src/server-setup/smiles-reboot-profile').RecoveryProfile})
+    await flushUntilExecFileCalled()
+    resolveExecFile(2, defaultOutput())
+    const result = await pending
+    expect(result.success).toBe(false)
+    const data = result.data as Record<string,unknown>
+    expect(data.serverSetupLocalTermination).toEqual({processClosed:true,executionId:'exec-1',sshHostId:'host-1'})
+    expect(data.serverSetupLocalCleanup).toEqual(removed?{sensitiveFilesRemoved:true,executionId:'exec-1',sshHostId:'host-1'}:undefined)
+    if (!removed) actualFs.rmSync(mockMkdtempSync.mock.results[0].value as string,{recursive:true,force:true})
+  })
   it('does not infer process closure from an execFile callback before close', async () => {
     const pending = runServerSetup(makePayload({body: '- debug:\n    msg: done'}), {commandId: 'cmd-1', client: makeClient()})
     await flushUntilExecFileCalled()
