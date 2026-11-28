@@ -42,6 +42,7 @@ import { logger } from '../logger'
 import { inspectSentryTasks } from './sentry-policy'
 import {
   buildInventory,
+  managedTargetKnownHost,
   normalizePrivateKeyMaterial,
   validateSshCredential,
   validateCredentialForTargetOs,
@@ -903,9 +904,9 @@ export async function executeServerSetupAnsible(
   // Persistent (not per-run) known_hosts file, namespaced by tenant + SSH host,
   // so `StrictHostKeyChecking=accept-new` (TOFU) actually detects a host key
   // change across runs.
-  let knownHostsPath: string
+  let knownHostsPath = ''
   try {
-    knownHostsPath = resolveKnownHostsPath(tenantCode, sshHostId)
+    if (!input.recoveryProfile) knownHostsPath = resolveKnownHostsPath(tenantCode, sshHostId)
   } catch (error) {
     return errorResult(`Failed to resolve known_hosts file: ${getErrorMessage(error)}`)
   }
@@ -917,6 +918,15 @@ export async function executeServerSetupAnsible(
   let result: CommandResult = errorResult('server_setup_exec: no result was produced')
   try {
     result = await (async (): Promise<CommandResult> => {
+      let managedTargetStrict = false
+      if (input.recoveryProfile) {
+        const {validateRecoveryProfile} = await import('./smiles-reboot-profile')
+        const profile = validateRecoveryProfile(input.recoveryProfile)
+        if (profile.executorProfile !== 'smiles-target-ansible-v1' || targetOs !== 'linux') throw new Error('SMILES_REBOOT_TARGET_HOST_KEY_REFUSED')
+        managedTargetStrict = true
+        knownHostsPath = path.join(tmpDir, 'managed-known_hosts')
+        writeFileSync(knownHostsPath, managedTargetKnownHost(credential, profile.publicInput.public_contract.target_host_key), {mode: 0o600, flag: 'wx'})
+      }
       // `credential.privateKey` only holds actual key material when
       // authType !== 'password' (see buildInventory's doc comment) — writing
       // a plaintext password here as if it were a key file is what caused
@@ -937,7 +947,7 @@ export async function executeServerSetupAnsible(
       // password (ansible_ssh_pass) — same permission level as id_rsa/
       // extra-vars.json alongside it.
       const inventoryPath = path.join(tmpDir, 'inventory.yml')
-      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath, targetOs), { mode: 0o600 })
+      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath, targetOs, managedTargetStrict), { mode: 0o600 })
 
       // Re-validate the body with the *real* `secretNames` just fetched, so the
       // normalized tasks carry accurate `no_log: true` annotations.
@@ -1155,6 +1165,7 @@ export async function executeServerSetupAnsible(
       try {
         runOutcome = await runAnsiblePlaybook(args, {
         ...process.env,
+        ...(managedTargetStrict ? {ANSIBLE_HOST_KEY_CHECKING: 'True'} : {}),
         // Ansible's `environment:` keyword is not a secret-safe channel: at -vvv
         // the connection plugin prints the EXEC line with every environment
         // value in cleartext, and `no_log: true` does not suppress it (verified
