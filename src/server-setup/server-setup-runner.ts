@@ -801,6 +801,7 @@ export interface ExecuteServerSetupAnsibleInput {
    * two-hour watchdog resolves. Wired on the api-driven path only; without it
    * the handshake extra-vars stay empty and the role skips the handshake.
    */
+  recoveryProfile?: import('./smiles-reboot-profile').RecoveryProfile
   onAwaitingSelfRestart?: () => Promise<SelfRestartDeclarationAck | void>
 }
 
@@ -1317,10 +1318,14 @@ export async function executeServerSetupAnsible(
       if (localProcessClosed && !sentry && synchronousTasks && taskResults.every(task => task.status !== 'failed')) {
         completion = {executionId, evidence: {kind: 'completed', sshHostId: input.sshHostId, processClosed: true}}
       }
+      if (input.recoveryProfile) {
+        const {parseTargetMetadata} = await import('./smiles-reboot-profile')
+        return successResult({stepResults:taskResults,recoveryMetadata:parseTargetMetadata(stdout,input.recoveryProfile)})
+      }
       return successResult({ stepResults: taskResults })
     })()
   } catch (error) {
-    result = errorResult(`Server setup execution failed: ${getErrorMessage(error)}`)
+    result = errorResult(input.recoveryProfile ? 'SMILES_REBOOT_PROFILE_REFUSED' : `Server setup execution failed: ${getErrorMessage(error)}`)
   } finally {
     // Must run on every exit path: the private key must never remain on disk
     // after this function returns.
@@ -1356,6 +1361,10 @@ export async function runServerSetup(
   payload: ServerSetupExecPayload,
   ctx: RunServerSetupContext,
 ): Promise<CommandResult> {
+  if (payload?.recoveryProfile !== undefined) {
+    const {runSmilesRebootProfile} = await import('./smiles-reboot-runner')
+    return runSmilesRebootProfile(payload,ctx)
+  }
   const mode = resolveRouteMode(payload)
   const targetOs = resolveTargetOs(payload)
   if (targetOs === null) {

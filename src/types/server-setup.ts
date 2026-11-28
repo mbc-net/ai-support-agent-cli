@@ -57,16 +57,16 @@ export interface ServerSetupExecPayload {
   executionId: string
   sshHostId: string
   body: string
+  recoveryProfile?: import('../server-setup/smiles-reboot-profile').RecoveryProfile
   dispatchMode?: ServerSetupDispatchMode
   /**
-   * Target OS of the host, decided by the api from the host settings and sent
-   * only for Windows hosts. Absent means Linux (payloads from api builds that
-   * predate Windows support). The agent resolves it with `resolveTargetOs`
+   * Authoritative target OS from host settings. Current dispatches send Linux
+   * explicitly; absent remains Linux for older API builds. The agent resolves it with `resolveTargetOs`
    * (an unknown value is rejected) and cross-checks it against the SSH
    * credential's `os` after fetching it (see admin-docs
    * `docs/specifications/server-setup-windows-openssh.md` §5.2).
    */
-  targetOs?: 'windows'
+  targetOs?: 'linux' | 'windows'
 }
 
 /**

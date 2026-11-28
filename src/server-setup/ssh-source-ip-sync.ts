@@ -85,7 +85,7 @@ export function verifyReceipt(value: unknown, p: SshSourceIpPayload): asserts va
 class SshHandshakeUnavailable extends Error {}
 
 /** Each invocation allocates a NEW ssh2 Client; no pooled/control-master session is reused. */
-export async function freshSsh(credential: SshExecCredential, fingerprint: string, command: string, input: string, timeoutMs = 120_000): Promise<string> {
+export async function freshSsh(credential: SshExecCredential, fingerprint: string, command: string, input: string, timeoutMs = 120_000, lifecycle?: {onClosed: () => void}): Promise<string> {
   const started = performance.now()
   const { Client: SshClient } = await import('ssh2')
   let sock: ConnectConfig['sock']
@@ -118,7 +118,7 @@ export async function freshSsh(credential: SshExecCredential, fingerprint: strin
     }
     const timer = setTimeout(() => finish(new Error('SSH policy command timed out')), remainingMs)
     conn.on('error', error => finish(error))
-    conn.on('close', () => { if (!settled) finish(new Error('SSH connection closed before command completion')) })
+    conn.on('close', () => { lifecycle?.onClosed(); if (!settled) finish(new Error('SSH connection closed before command completion')) })
     conn.on('ready', () => { ready = true; conn.exec(command, (error, stream) => {
       if (error) { finish(error); return }
       stream.on('data', (data: Buffer) => {
@@ -130,7 +130,7 @@ export async function freshSsh(credential: SshExecCredential, fingerprint: strin
         if (stderr.length > 16384) finish(new Error('SSH policy error output limit exceeded'))
       })
       stream.on('error', (error: Error) => finish(error))
-      stream.on('close', (code: number) => finish(code === 0 ? undefined : new Error(stderr.trim() || `SSH policy helper exited ${code}`)))
+      stream.on('close', (code: number) => { lifecycle?.onClosed(); finish(code === 0 ? undefined : new Error(stderr.trim() || `SSH policy helper exited ${code}`)) })
       stream.end(input)
     }) })
     try { conn.connect({host:credential.hostname,port:credential.port,username:credential.username,privateKey:credential.privateKey,

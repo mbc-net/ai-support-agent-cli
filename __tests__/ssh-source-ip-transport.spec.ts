@@ -1,14 +1,15 @@
 import { EventEmitter } from 'events'
 import { createHash } from 'crypto'
-import { runSshSourceIpSync } from '../src/server-setup/ssh-source-ip-sync'
+import { freshSsh, runSshSourceIpSync } from '../src/server-setup/ssh-source-ip-sync'
 
 const mockCalls: {command:string;request:Record<string,unknown>|null}[] = []
 let mockResponses: (unknown|Error)[] = []
 let mockClients = 0
 let mockConnectFailures: (Error | undefined)[] = []
 let mockHostKeys: (string | undefined)[] = []
+let mockLastClient: EventEmitter
 jest.mock('ssh2', () => ({ Client: class extends EventEmitter {
-  constructor() { super(); mockClients++ }
+  constructor() { super(); mockClients++; mockLastClient=this }
   connect(config: {hostVerifier:(key:Buffer)=>boolean;password?:string;privateKey:string}) {
     expect(config.password).toBeUndefined()
     expect(config.privateKey).toBe('private-key')
@@ -39,6 +40,17 @@ const client = {getSshSourceIpCredential: jest.fn(async () => ({hostId:'host',ho
 const context = {commandId:'command',agentId:'agent',client:client as never}
 
 beforeEach(() => { mockResponses=[];mockCalls.length=0;mockClients=0;mockConnectFailures=[];mockHostKeys=[];jest.clearAllMocks() })
+
+test('optional lifecycle observes real stream close, including nonzero exit',async()=>{
+  const onClosed=jest.fn();mockResponses=[new Error('synthetic helper failure')]
+  await expect(freshSsh(await client.getSshSourceIpCredential(),payload.expectedHostKeySha256,'fixed-readonly','{}',1000,{onClosed})).rejects.toThrow('synthetic helper failure')
+  expect(onClosed).toHaveBeenCalledTimes(1)
+})
+test('destroy on transport error is not closed proof; later real connection close is',async()=>{
+  const onClosed=jest.fn();mockConnectFailures=[Object.assign(new Error('reset'),{code:'ECONNRESET'})]
+  await expect(freshSsh(await client.getSshSourceIpCredential(),payload.expectedHostKeySha256,'fixed-readonly','{}',1000,{onClosed})).rejects.toThrow('reset')
+  expect(onClosed).not.toHaveBeenCalled();mockLastClient.emit('close');expect(onClosed).toHaveBeenCalledTimes(1)
+})
 
 test('apply then confirmation creates a new pinned key-only SSH connection and binds nonce/version',async () => {
   mockResponses=['installed',{status:'absent'},{machineId:receipt.machineId,removedRules:[]},{...receipt,status:'pending'},receipt]
