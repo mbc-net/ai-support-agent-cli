@@ -79,6 +79,7 @@ import { ENV_VARS } from '../../src/constants'
 import { cancelProcess } from '../../src/commands/process-manager'
 import { resetInstanceIdCacheForTest } from '../../src/replica-identity'
 import { logger } from '../../src/logger'
+import {TARGET_PROFILE_SHA256,type RecoveryProfile} from '../../src/server-setup/smiles-reboot-profile'
 import type { ApiClient } from '../../src/api-client'
 import type { ServerSetupExecPayload, ServerSetupVariablesResponse, SshCredentials } from '../../src/types'
 
@@ -95,6 +96,8 @@ const CREDENTIAL: SshCredentials = {
   authType: 'privateKey',
   privateKey: PRIVATE_KEY,
 }
+const MANAGED_HOST_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+function managedProfile():RecoveryProfile{return {revision:'smiles-reboot-profile-v1',executorProfile:'smiles-target-ansible-v1',jobId:'11111111-1111-4111-8111-111111111111',stepId:'observe',runId:'a'.repeat(32),parentRunId:'b'.repeat(32),oldTransportRunId:'b'.repeat(32),sourceBootId:'22222222-2222-4222-8222-222222222222',targetBootId:'33333333-3333-4333-8333-333333333333',accountOwnerRunId:'8d6f037733724fbe969cf513e11b4b9f',profileSha256:TARGET_PROFILE_SHA256,publicInput:{public_contract:{purpose:'follow',ttl_seconds:3600,public_key:MANAGED_HOST_KEY,target_host_key:MANAGED_HOST_KEY,source_ca_pem:'-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n'},continuity_intent:null,source_reboot_receipt:null,source_closure_receipt:null,source_key_receipt:null}}}
 
 // Two include_role built-in steps — valid in both ecs and resident modes.
 // Task names are quoted because they contain a `: ` (YAML would otherwise
@@ -227,6 +230,37 @@ beforeEach(() => {
 })
 
 describe('configuration completion proof', () => {
+  it('managed Target seeds a private per-run known_hosts and forces strict SSH before Ansible',async()=>{
+    const old=process.env.ANSIBLE_HOST_KEY_CHECKING;process.env.ANSIBLE_HOST_KEY_CHECKING='False'
+    try{
+      const pending=executeServerSetupAnsible({executionId:'exec-1',body:DEFAULT_BODY,mode:'ecs',targetOs:'linux',credential:{...CREDENTIAL,hostname:'133.18.114.57'},variables:{},secretNames:[],tenantCode:'acme',sshHostId:'host-1',client:makeClient(),recoveryProfile:managedProfile()})
+      await flushUntilExecFileCalled()
+      const hostCall=mockWriteFileSync.mock.calls.find(c=>String(c[0]).endsWith('/managed-known_hosts'))!
+      expect(hostCall[1]).toBe('133.18.114.57 '+MANAGED_HOST_KEY+'\n');expect(hostCall[2]).toEqual({mode:0o600,flag:'wx'});expect(actualFs.statSync(hostCall[0]).mode&0o777).toBe(0o600)
+      expect(mockResolveKnownHostsPath).not.toHaveBeenCalled()
+      const inventory=JSON.parse(writtenFile('inventory.yml')!).target.hosts['133.18.114.57']
+      expect(inventory.ansible_ssh_args).toContain('StrictHostKeyChecking=yes');expect(inventory.ansible_ssh_args).toContain('GlobalKnownHostsFile=/dev/null');expect(inventory.ansible_ssh_args).toContain('HostKeyAlgorithms=ssh-ed25519');expect(inventory.ansible_ssh_args).toContain('UserKnownHostsFile='+hostCall[0]);expect(inventory.ansible_ssh_extra_args).toBe('');expect(inventory.ansible_host_key_checking).toBe(true)
+      expect(mockExecFile.mock.calls.at(-1)![2].env.ANSIBLE_HOST_KEY_CHECKING).toBe('True')
+      resolveExecFile(2,defaultOutput());await pending;expect(actualFs.existsSync(hostCall[0])).toBe(false)
+    }finally{if(old===undefined)delete process.env.ANSIBLE_HOST_KEY_CHECKING;else process.env.ANSIBLE_HOST_KEY_CHECKING=old}
+  })
+  it.each(['',MANAGED_HOST_KEY+'\nattacker', 'ssh-rsa AAAA','ssh-ed25519 AAAA'])('unknown/noncanonical Target key refuses before private file or process: %s',async key=>{
+    const p=managedProfile();p.publicInput.public_contract.target_host_key=key
+    const result=await executeServerSetupAnsible({executionId:'exec-1',body:DEFAULT_BODY,mode:'ecs',targetOs:'linux',credential:{...CREDENTIAL,hostname:'133.18.114.57'},variables:{},secretNames:[],tenantCode:'acme',sshHostId:'host-1',client:makeClient(),recoveryProfile:p})
+    expect(result.success).toBe(false);expect(mockExecFile).not.toHaveBeenCalled();expect(mockWriteFileSync.mock.calls.some(c=>String(c[0]).endsWith('id_rsa'))).toBe(false)
+  })
+  it.each([true, false])('managed cleanup evidence requires actual temp removal: %s', async removed => {
+    if (!removed) mockRmSync.mockImplementationOnce(() => { throw new Error('synthetic cleanup failure') })
+    const pending = executeServerSetupAnsible({executionId:'exec-1',body:DEFAULT_BODY,mode:'ecs',targetOs:'linux',credential:{...CREDENTIAL,hostname:'133.18.114.57'},variables:{},secretNames:[],tenantCode:'acme',sshHostId:'host-1',client:makeClient(),recoveryProfile:managedProfile()})
+    await flushUntilExecFileCalled()
+    resolveExecFile(2, defaultOutput())
+    const result = await pending
+    expect(result.success).toBe(false)
+    const data = result.data as Record<string,unknown>
+    expect(data.serverSetupLocalTermination).toEqual({processClosed:true,executionId:'exec-1',sshHostId:'host-1'})
+    expect(data.serverSetupLocalCleanup).toEqual(removed?{sensitiveFilesRemoved:true,executionId:'exec-1',sshHostId:'host-1'}:undefined)
+    if (!removed) actualFs.rmSync(mockMkdtempSync.mock.results[0].value as string,{recursive:true,force:true})
+  })
   it('does not infer process closure from an execFile callback before close', async () => {
     const pending = runServerSetup(makePayload({body: '- debug:\n    msg: done'}), {commandId: 'cmd-1', client: makeClient()})
     await flushUntilExecFileCalled()

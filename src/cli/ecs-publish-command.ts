@@ -188,7 +188,7 @@ export async function runEcsPublish(opts: EcsPublishCliOptions): Promise<void> {
     // ECS execution agents can run server-setup recipe bodies (custom Ansible
     // tasks) in the strict `ecs` guard mode; advertise the capability so the
     // api will dispatch body-carrying recipes to this agent.
-    capabilities: [SERVER_SETUP_CUSTOM_TASKS_CAPABILITY, SENTRY_CAPABILITY],
+    capabilities: [SERVER_SETUP_CUSTOM_TASKS_CAPABILITY, SENTRY_CAPABILITY, 'server_setup_smiles_reboot_v1'],
     ecsConfig: {
       imageUri: image.imageUri,
       imageTag: image.imageTag,

@@ -1,0 +1,42 @@
+# Build from an allowlisted context containing package*.json, dist/, ansible/,
+# and this entrypoint only. Never send a worktree, credentials or .env to Docker.
+FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS runtime-base
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils python3 python3-venv openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+# Same verified Node release as the general agent image.
+RUN arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) node_arch=x64; node_sha=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75 ;; \
+      arm64) node_arch=arm64; node_sha=eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8 ;; \
+      *) exit 1 ;; \
+    esac; \
+    curl -fsSL "https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-${node_arch}.tar.xz" -o /tmp/node.tar.xz \
+    && echo "$node_sha  /tmp/node.tar.xz" | sha256sum -c - \
+    && python3 -m tarfile -e /tmp/node.tar.xz /tmp/node-unpack \
+    && cp -a "/tmp/node-unpack/node-v24.22.2-linux-${node_arch}/." /usr/local/ \
+    && rm -rf /tmp/node.tar.xz /tmp/node-unpack
+RUN python3 -m venv /opt/ansible \
+    && /opt/ansible/bin/pip install --no-cache-dir ansible-core==2.20.11
+ENV PATH="/opt/ansible/bin:${PATH}" LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+FROM runtime-base AS dependencies
+WORKDIR /opt/agent
+COPY package.json package-lock.json ./
+# Optional browser/native-terminal tools are outside the fixed recovery profile.
+# Lifecycle scripts are unnecessary for the pure-JS production dependencies.
+RUN npm ci --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund \
+    && npm cache clean --force
+
+FROM runtime-base
+COPY --from=dependencies /opt/agent /opt/agent
+COPY dist/ /opt/agent/dist/
+COPY ansible/ /opt/agent/ansible/
+COPY smiles-reboot-entrypoint.sh /usr/local/bin/smiles-reboot-entrypoint
+RUN chmod 0555 /usr/local/bin/smiles-reboot-entrypoint \
+    && mkdir /workspace && chown 1000:1000 /workspace
+USER 1000:1000
+ENV HOME=/workspace
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/smiles-reboot-entrypoint"]

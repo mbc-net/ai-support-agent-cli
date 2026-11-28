@@ -1,0 +1,47 @@
+import {createHash} from 'crypto'
+import {validateRecoveryProfile, SOURCE_PROFILE_SHA256,TARGET_PROFILE_SHA256,parseTargetMetadata,validatePublicResult,REBOOT_CORE_SHA256,validateRecoveryMetadata,recoveryMetadata,type RecoveryProfile} from '../../src/server-setup/smiles-reboot-profile'
+const profile=()=>({revision:'smiles-reboot-profile-v1',executorProfile:'smiles-source-python38-v1',jobId:'11111111-1111-4111-8111-111111111111',stepId:'source-observe',runId:'a'.repeat(32),sourceBootId:'22222222-2222-4222-8222-222222222222',targetBootId:'33333333-3333-4333-8333-333333333333',parentRunId:'b'.repeat(32),oldTransportRunId:'b'.repeat(32),accountOwnerRunId:'8d6f037733724fbe969cf513e11b4b9f',profileSha256:SOURCE_PROFILE_SHA256,publicInput:{public_contract:{purpose:'follow',ttl_seconds:43200,public_key:'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',target_host_key:'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',source_ca_pem:'-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n'},continuity_intent:null,source_reboot_receipt:null,source_closure_receipt:null,source_key_receipt:null}})
+describe('dedicated reboot profile admission',()=>{
+ test('source metadata is typed and accepts enrolled public template',()=>expect(validateRecoveryProfile(profile()).stepId).toBe('source-observe'))
+ test.each([{privateKey:'SECRET'},{profileSha256:'0'.repeat(64)},{stepId:'shell'},{accountOwnerRunId:'f'.repeat(32)}])('unknown fields or release/step/owner fail closed',change=>expect(()=>validateRecoveryProfile({...profile(),...change})).toThrow('SMILES_REBOOT_PROFILE_REFUSED'))
+ test('soft stop alone admits the exact current parent run, without old proof input',()=>{const value={...profile(),executorProfile:'smiles-target-ansible-v1',profileSha256:TARGET_PROFILE_SHA256,stepId:'stop',runId:'b'.repeat(32)};expect(validateRecoveryProfile(value).stepId).toBe('stop');expect(()=>validateRecoveryProfile({...value,oldTransportRunId:'c'.repeat(32)})).toThrow();expect(()=>validateRecoveryProfile({...value,stepId:'resume'})).toThrow()})
+ test('public intent stays legacy six fields; new core seven fields are internal only',()=>{const p=profile();const i={revision:'smiles-reverse-continuity-intent-v1',account_owner_run_id:p.accountOwnerRunId,new_run_id:p.runId,parent_kind:'reboot-v1',parent_session_run_id:p.parentRunId,old_transport_run_id:p.oldTransportRunId};expect(validateRecoveryProfile({...p,publicInput:{...p.publicInput,continuity_intent:i}}).publicInput.continuity_intent).toEqual(i);expect(()=>validateRecoveryProfile({...p,publicInput:{...p.publicInput,continuity_intent:{...i,revision:'smiles-reboot-continuity-intent-v1',source_reboot_receipt_sha256:'a'.repeat(64)}}})).toThrow()})
+ test('secret-looking arbitrary public fields cannot become metadata',()=>expect(()=>validateRecoveryProfile({...profile(),publicInput:{...profile().publicInput,secret:'SECRET'}})).toThrow())
+})
+
+describe('public Ansible callback projection',()=>{
+ const p={...profile(),executorProfile:'smiles-target-ansible-v1',stepId:'resume'} as RecoveryProfile
+ const result={session_run_id:p.runId,status:'prepared'}
+ const callback=(hosts:unknown)=>JSON.stringify({plays:[{tasks:[{task:{name:'sudo probe'},hosts:{host:{rc:0,stdout:'0'}}},{task:{name:'SMILES_REBOOT_PUBLIC_RESULT'},hosts}]}]})
+ test('precheck stdout ignored, one public marker projected',()=>expect(parseTargetMetadata(callback({host:{rc:0,stdout:JSON.stringify(result)}}),p).publicResult).toEqual(result))
+ test.each([{host:{rc:1,stdout:JSON.stringify(result)}},{host:{rc:0,_ansible_no_log:true,stdout:JSON.stringify(result)}},{host:{rc:0,stdout:'PRIVATE_RAW'}},{one:{rc:0,stdout:JSON.stringify(result)},two:{rc:0,stdout:JSON.stringify(result)}}])('bad result refused',hosts=>expect(()=>parseTargetMetadata(callback(hosts),p)).toThrow())
+ test('unknown field cannot leave agent',()=>expect(()=>parseTargetMetadata(callback({host:{rc:0,stdout:JSON.stringify({...result,PRIVATE:'SECRET'})}}),p)).toThrow())
+ test('backend can independently validate complete metadata binding',()=>{const value=recoveryMetadata(result,p);expect(validateRecoveryMetadata(value,p)).toEqual(value);expect(()=>validateRecoveryMetadata({...value,jobId:'wrong'},p)).toThrow();expect(()=>validateRecoveryMetadata({...value,PRIVATE:'secret'},p)).toThrow()})
+})
+
+describe('snapshot carries actual states and deadline without secret data',()=>{
+ const p={...profile(),executorProfile:'smiles-target-ansible-v1',stepId:'observe'} as RecoveryProfile
+ const fp='SHA256:'+createHash('sha256').update(Buffer.from((p.publicInput.public_contract.public_key as string).split(' ')[1],'base64')).digest('base64').replace(/=+$/,'')
+ const snapshot=()=>({revision:'smiles-reboot-public-metadata-v1',observed_at:1,helper_sha256:REBOOT_CORE_SHA256,account_owner_run_id:p.accountOwnerRunId,parent_kind:'continuity-v1',parent_run_id:p.parentRunId,old_transport_run_id:p.oldTransportRunId,restore_run_id:'c'.repeat(32),candidate_cid:'d'.repeat(64),candidate_uuid:'44444444-4444-4444-8444-444444444444',source_uuid:'0841a208-dff7-11eb-a786-00135d131624',target_boot_id:p.targetBootId,phase:'stopped',transport_phase:'cleaned',cleanup_confirmed:true,source_key_fingerprint:fp,io_errno:2013,sql_errno:0,read_only:true,super_read_only:true,event_scheduler_off:true,admitted_source_boot_id:null,progress:{Seconds_Behind_Source:null,Read_Source_Log_Pos:100,Exec_Source_Log_Pos:100,Source_Log_File:'binlog.004705',Relay_Source_Log_File:'binlog.004705'},lease_deadline_utc:123456,io_state:'No',sql_state:'No'})
+ test('well formed actual fields accepted',()=>expect(validatePublicResult(snapshot(),p).io_errno).toBe(2013))
+ test.each([{io_state:'invented'},{sql_state:'Connecting'},{lease_deadline_utc:'123456'},{read_only:false},{target_boot_id:'wrong'},{PRIVATE:'SECRET'}])('unknown unsafe projection rejected',change=>expect(()=>validatePublicResult({...snapshot(),...change},p)).toThrow())
+})
+
+describe('fresh Source key receipt keeps old closure and new key independent',()=>{
+ const fingerprint=(key:string)=>'SHA256:'+createHash('sha256').update(Buffer.from(key.split(' ')[1],'base64')).digest('base64').replace(/=+$/,'')
+ function prepared():RecoveryProfile{
+  const p={...profile(),executorProfile:'smiles-target-ansible-v1',profileSha256:TARGET_PROFILE_SHA256,stepId:'prepare-target'} as RecoveryProfile
+  const oldKey=p.publicInput.public_contract.public_key as string,oldFp=fingerprint(oldKey)
+  const newKey='ssh-ed25519 '+Buffer.concat([Buffer.from('0000000b7373682d6564323535313900000020','hex'),Buffer.alloc(32,1)]).toString('base64')
+  p.publicInput.public_contract={...p.publicInput.public_contract,public_key:newKey}
+  p.publicInput.continuity_intent={revision:'smiles-reverse-continuity-intent-v1',account_owner_run_id:p.accountOwnerRunId,new_run_id:p.runId,parent_kind:'reboot-v1',parent_session_run_id:p.parentRunId,old_transport_run_id:p.oldTransportRunId}
+  p.publicInput.source_key_receipt={revision:'smiles-source-key-stage-v1',status:'key_prepared',run_id:p.runId,job_id:p.jobId,account_owner_run_id:p.accountOwnerRunId,source_boot_id:p.sourceBootId,helper_sha256:'f8f3c09150ca501f224346d004fb21296c4dca1bd7e0d47d728bd032884b5353',public_key:newKey,source_key_fingerprint:fingerprint(newKey),stage_nonce:'f'.repeat(64),deadline_utc:9999999999}
+  p.publicInput.source_reboot_receipt={revision:'smiles-source-reboot-closure-v1',run_id:p.oldTransportRunId,source_ip:'140.227.124.149',helper_sha256:'f8f3c09150ca501f224346d004fb21296c4dca1bd7e0d47d728bd032884b5353',old_boot_id:p.targetBootId,new_boot_id:p.sourceBootId,old_phase:'cleaned',source_key_fingerprint:oldFp,private_runtime_absent:true,old_boot_processes_absent:true,unit_main_pid:0,watchdogs_stopped:true,old_journal_mutated:false,legacy_start_admitted:false,source_state_sha256:'a'.repeat(64),observed_at_utc:1}
+  p.publicInput.source_closure_receipt={revision:'smiles-source-tunnel-closure-v1',run_id:p.oldTransportRunId,helper_sha256:'f8f3c09150ca501f224346d004fb21296c4dca1bd7e0d47d728bd032884b5353',source_ip:'140.227.124.149',unit:'smiles-reverse-source-'+p.oldTransportRunId+'.service',source_key_fingerprint:oldFp,phase:'cleaned',cleanup_confirmed:true,unit_main_pid:0,private_runtime_absent:true,owned_ssh_absent:true,watchdogs_stopped:true,observed_at_utc:1}
+  return p
+ }
+ test('old closure key differs from fresh public target key',()=>{const p=prepared();expect(validateRecoveryProfile(p)).toBe(p);expect(p.publicInput.source_closure_receipt!.source_key_fingerprint).not.toBe(p.publicInput.source_key_receipt!.source_key_fingerprint)})
+ test.each(['job_id','run_id','account_owner_run_id','source_boot_id','helper_sha256','stage_nonce','public_key'] as const)('key receipt drift rejects %s',field=>{const p=prepared();p.publicInput.source_key_receipt![field]='drift';expect(()=>validateRecoveryProfile(p)).toThrow()})
+ test('old receipts cannot independently change fingerprint to new key',()=>{const p=prepared();p.publicInput.source_closure_receipt!.source_key_fingerprint=p.publicInput.source_key_receipt!.source_key_fingerprint;expect(()=>validateRecoveryProfile(p)).toThrow()})
+ test('no unbound private/unknown field or legacy four-field input',()=>{const p=prepared();p.publicInput.source_key_receipt!.private_key='NEVER';expect(()=>validateRecoveryProfile(p)).toThrow();delete p.publicInput.source_key_receipt;expect(()=>validateRecoveryProfile(p)).toThrow()})
+})

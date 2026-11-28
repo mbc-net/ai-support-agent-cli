@@ -171,14 +171,17 @@ export function buildInventory(
   keyPath: string,
   knownHostsPath: string,
   targetOs: AnsibleTargetOs,
+  managedTargetStrict = false,
 ): string {
   const isTailscale = credential.connectionType === 'tailscale'
+  if (managedTargetStrict && (isTailscale || targetOs !== 'linux' || !/^\/[A-Za-z0-9_./-]+$/.test(knownHostsPath))) throw new Error('SMILES_REBOOT_TARGET_HOST_KEY_REFUSED')
   const ansibleHost = isTailscale ? (credential.tailnetHostname as string) : credential.hostname
   const socksPort = credential.socksPort ?? TAILSCALE_SOCKS_PORT
   const proxyCommandArg = isTailscale
     ? ` -o ProxyCommand="nc -X 5 -x 127.0.0.1:${socksPort} %h %p"`
     : ''
-  const commonArgs = `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${knownHostsPath}${proxyCommandArg}`
+  const strictArgs = `-F /dev/null -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${knownHostsPath} -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 -o VerifyHostKeyDNS=no -o UpdateHostKeys=no -o ControlMaster=no -o ControlPersist=no -o ControlPath=none -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes`
+  const commonArgs = managedTargetStrict ? strictArgs : `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${knownHostsPath}${proxyCommandArg}`
   const authVars = credential.authType === 'password'
     ? { ansible_ssh_pass: credential.privateKey }
     : { ansible_ssh_private_key_file: keyPath }
@@ -191,6 +194,16 @@ export function buildInventory(
           ansible_user: credential.username,
           ...authVars,
           ansible_ssh_common_args: commonArgs,
+          ...(managedTargetStrict ? {
+            ansible_connection: 'ssh',
+            // ssh_args precedes common_args in the plugin's argv: inherited
+            // environment/config must not place a weaker first-wins option first.
+            ansible_ssh_args: strictArgs,
+            ansible_ssh_extra_args: '',
+            ansible_host_key_checking: true,
+            ansible_ssh_host_key_checking: true,
+            ansible_ssh_executable: '/usr/bin/ssh',
+          } : {}),
           // Windows OpenSSH with PowerShell as the default shell (a host
           // prerequisite). Fixed by the agent; `ansible_*` stays reserved in
           // the guard, so a recipe cannot change it.
@@ -200,4 +213,18 @@ export function buildInventory(
     },
   }
   return JSON.stringify(inventory)
+}
+
+/** Approved public key only. No lookup, keyscan, or first-connection adoption. */
+export function managedTargetKnownHost(credential: SshExecCredential, publicKey: unknown): string {
+  const refused = () => { throw new Error('SMILES_REBOOT_TARGET_HOST_KEY_REFUSED') }
+  if (credential.hostname !== '133.18.114.57' || credential.port !== 22 ||
+      credential.connectionType && credential.connectionType !== 'ssh' ||
+      typeof publicKey !== 'string' || publicKey.length > 256 ||
+      !/^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/.test(publicKey)) return refused()
+  const encoded = publicKey.split(' ')[1]
+  const wire = Buffer.from(encoded, 'base64')
+  if (wire.length !== 51 || wire.toString('base64') !== encoded ||
+      !wire.subarray(0, 19).equals(Buffer.from('0000000b7373682d6564323535313900000020', 'hex'))) return refused()
+  return `${credential.hostname} ${publicKey}\n`
 }

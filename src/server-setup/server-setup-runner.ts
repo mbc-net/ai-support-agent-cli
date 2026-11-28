@@ -42,6 +42,7 @@ import { logger } from '../logger'
 import { inspectSentryTasks } from './sentry-policy'
 import {
   buildInventory,
+  managedTargetKnownHost,
   normalizePrivateKeyMaterial,
   validateSshCredential,
   validateCredentialForTargetOs,
@@ -801,6 +802,7 @@ export interface ExecuteServerSetupAnsibleInput {
    * two-hour watchdog resolves. Wired on the api-driven path only; without it
    * the handshake extra-vars stay empty and the role skips the handshake.
    */
+  recoveryProfile?: import('./smiles-reboot-profile').RecoveryProfile
   onAwaitingSelfRestart?: () => Promise<SelfRestartDeclarationAck | void>
 }
 
@@ -884,6 +886,7 @@ export async function executeServerSetupAnsible(
   // sequence.
   let sentry: ReturnType<typeof inspectSentryTasks> = null
   let localProcessClosed = false
+  let sensitiveFilesRemoved = false
   let completion: CommandResult['serverSetupConfigurationCompletion']
   let synchronousTasks = false
   let sentryCompanionsSynchronous = false
@@ -901,9 +904,9 @@ export async function executeServerSetupAnsible(
   // Persistent (not per-run) known_hosts file, namespaced by tenant + SSH host,
   // so `StrictHostKeyChecking=accept-new` (TOFU) actually detects a host key
   // change across runs.
-  let knownHostsPath: string
+  let knownHostsPath = ''
   try {
-    knownHostsPath = resolveKnownHostsPath(tenantCode, sshHostId)
+    if (!input.recoveryProfile) knownHostsPath = resolveKnownHostsPath(tenantCode, sshHostId)
   } catch (error) {
     return errorResult(`Failed to resolve known_hosts file: ${getErrorMessage(error)}`)
   }
@@ -915,6 +918,15 @@ export async function executeServerSetupAnsible(
   let result: CommandResult = errorResult('server_setup_exec: no result was produced')
   try {
     result = await (async (): Promise<CommandResult> => {
+      let managedTargetStrict = false
+      if (input.recoveryProfile) {
+        const {validateRecoveryProfile} = await import('./smiles-reboot-profile')
+        const profile = validateRecoveryProfile(input.recoveryProfile)
+        if (profile.executorProfile !== 'smiles-target-ansible-v1' || targetOs !== 'linux') throw new Error('SMILES_REBOOT_TARGET_HOST_KEY_REFUSED')
+        managedTargetStrict = true
+        knownHostsPath = path.join(tmpDir, 'managed-known_hosts')
+        writeFileSync(knownHostsPath, managedTargetKnownHost(credential, profile.publicInput.public_contract.target_host_key), {mode: 0o600, flag: 'wx'})
+      }
       // `credential.privateKey` only holds actual key material when
       // authType !== 'password' (see buildInventory's doc comment) — writing
       // a plaintext password here as if it were a key file is what caused
@@ -935,7 +947,7 @@ export async function executeServerSetupAnsible(
       // password (ansible_ssh_pass) — same permission level as id_rsa/
       // extra-vars.json alongside it.
       const inventoryPath = path.join(tmpDir, 'inventory.yml')
-      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath, targetOs), { mode: 0o600 })
+      writeFileSync(inventoryPath, buildInventory(credential, keyPath, knownHostsPath, targetOs, managedTargetStrict), { mode: 0o600 })
 
       // Re-validate the body with the *real* `secretNames` just fetched, so the
       // normalized tasks carry accurate `no_log: true` annotations.
@@ -1153,6 +1165,7 @@ export async function executeServerSetupAnsible(
       try {
         runOutcome = await runAnsiblePlaybook(args, {
         ...process.env,
+        ...(managedTargetStrict ? {ANSIBLE_HOST_KEY_CHECKING: 'True'} : {}),
         // Ansible's `environment:` keyword is not a secret-safe channel: at -vvv
         // the connection plugin prints the EXEC line with every environment
         // value in cleartext, and `no_log: true` does not suppress it (verified
@@ -1317,15 +1330,20 @@ export async function executeServerSetupAnsible(
       if (localProcessClosed && !sentry && synchronousTasks && taskResults.every(task => task.status !== 'failed')) {
         completion = {executionId, evidence: {kind: 'completed', sshHostId: input.sshHostId, processClosed: true}}
       }
+      if (input.recoveryProfile) {
+        const {parseTargetMetadata} = await import('./smiles-reboot-profile')
+        return successResult({stepResults:taskResults,recoveryMetadata:parseTargetMetadata(stdout,input.recoveryProfile)})
+      }
       return successResult({ stepResults: taskResults })
     })()
   } catch (error) {
-    result = errorResult(`Server setup execution failed: ${getErrorMessage(error)}`)
+    result = errorResult(input.recoveryProfile ? 'SMILES_REBOOT_PROFILE_REFUSED' : `Server setup execution failed: ${getErrorMessage(error)}`)
   } finally {
     // Must run on every exit path: the private key must never remain on disk
     // after this function returns.
     try {
       rmSync(tmpDir, { recursive: true, force: true })
+      sensitiveFilesRemoved = true
     } catch (cleanupError) {
       const message = getErrorMessage(cleanupError)
       logger.error(`[server-setup] Failed to remove temp dir ${tmpDir}: ${message}`)
@@ -1340,7 +1358,9 @@ export async function executeServerSetupAnsible(
     const data = typeof result.data === 'string' ? JSON.parse(result.data) : (result.data ?? {})
     const withProof = {...data as Record<string, unknown>, serverSetupLocalTermination: {
       processClosed: true, executionId, sshHostId: input.sshHostId,
-    }}
+    }, ...(input.recoveryProfile && sensitiveFilesRemoved ? {
+      serverSetupLocalCleanup: {sensitiveFilesRemoved: true, executionId, sshHostId: input.sshHostId},
+    } : {})}
     result = {...result, data: typeof result.data === 'string' ? JSON.stringify(withProof) : withProof}
   }
   return completion ? {...result, serverSetupConfigurationCompletion: completion} : result
@@ -1356,6 +1376,10 @@ export async function runServerSetup(
   payload: ServerSetupExecPayload,
   ctx: RunServerSetupContext,
 ): Promise<CommandResult> {
+  if (payload?.recoveryProfile !== undefined) {
+    const {runSmilesRebootProfile} = await import('./smiles-reboot-runner')
+    return runSmilesRebootProfile(payload,ctx)
+  }
   const mode = resolveRouteMode(payload)
   const targetOs = resolveTargetOs(payload)
   if (targetOs === null) {

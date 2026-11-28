@@ -47,7 +47,7 @@
   "scripts": {
     "dev": "node --env-file-if-exists=.env --require ts-node/register src/index.ts",
     "server-setup:local-run": "node --env-file-if-exists=.env --require ts-node/register src/server-setup/server-setup-local-run.cli.ts",
-    "build": "tsc && cp -r src/locales dist/locales && cp -r src/plugin dist/plugin && chmod +x dist/plugin/hooks/scripts/*.sh",
+    "build": "tsc && cp -r src/server-setup/reboot-assets dist/server-setup/ && cp -r src/locales dist/locales && cp -r src/plugin dist/plugin && chmod +x dist/plugin/hooks/scripts/*.sh",
     "prepublishOnly": "npm run build && npm test",
     "test": "jest",
     "test:cov": "jest --coverage",
